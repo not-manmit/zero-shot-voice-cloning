@@ -1,198 +1,56 @@
-# 🎙️ Zero-Shot Voice Cloning Engine (DSP + GenAI)
+# Zero-Shot Voice Cloning System (MATLAB)
 
-A modular, production-grade boilerplate for a **Zero-Shot Voice Cloning System**
-built with **FastAPI**, **PyTorch**, **OpenAI Whisper**, **F5-TTS / XTTS-v2**,
-signal processing (**Librosa / noisereduce**), and a **Streamlit** testing UI.
+This project is a MATLAB Online implementation of a DSP-first zero-shot voice cloning pipeline. The local repository contains text-based MATLAB code only; audio samples and model weights are downloaded or supplied in MATLAB Online.
 
-Given a short reference clip (15–30s), the pipeline:
+## Requirements
 
-1. **Cleans** the audio (mono, resample, noise gate, silence trim, peak normalize).
-2. **Transcribes** it with Whisper to obtain the reference text.
-3. **Synthesizes** the target text in the cloned voice using a zero-shot TTS model.
-4. **Returns** the generated WAV over HTTP.
+- MATLAB Online
+- Audio Toolbox
+- Deep Learning Toolbox
+- Signal Processing Toolbox
+- A compatible zero-shot TTS model exported as ONNX
 
----
+## Layout
 
-## 📁 Project Structure
+- `src/dsp/preprocess_signal.m`: mono conversion, resampling to 24 kHz, spectral gating, and peak normalization.
+- `src/dsp/stft_analysis.m`: Hann-windowed STFT and explicit triangular Mel filter bank.
+- `src/models/load_onnx_engine.m`: ONNX import boundary.
+- `src/models/synthesize_features.m`: model inference adapter for text and speaker features.
+- `src/vocoder/reconstruct_waveform.m`: iterative ISTFT reconstruction baseline.
+- `ui/VoiceClonerApp.m`: programmatic App Designer-compatible UI entry point.
+- `scripts/download_weights.m`: MATLAB Online model download utility.
 
-```
-voice-cloner-pipeline/
-├── src/
-│   ├── __init__.py
-│   ├── audio/
-│   │   ├── __init__.py
-│   │   ├── cleaner.py      # DSP: resample, noise suppression, trim, normalize
-│   │   └── transcriber.py  # ASR: OpenAI Whisper reference transcription
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── tts_engine.py   # Zero-shot TTS wrapper (F5-TTS / XTTS-v2)
-│   └── api/
-│       ├── __init__.py
-│       └── main.py         # FastAPI endpoints: /api/clone, /health
-├── notebooks/
-│   └── colab_server.ipynb  # Colab GPU runner with pyngrok tunnel
-├── ui/
-│   └── app.py              # Streamlit testing UI
-├── docker/
-│   └── Dockerfile
-├── .gitignore
-├── requirements.txt
-├── main.py                 # Local entry point for the FastAPI server
-└── README.md
-```
+## MATLAB Online quick start
 
----
+1. Pull the repository into MATLAB Drive.
+2. Add the source folders to the MATLAB path:
 
-## ⚙️ Installation
+   ```matlab
+   addpath(genpath(pwd));
+   ```
 
-### Prerequisites
+3. Load and preprocess a reference clip:
 
-- Python **3.9–3.11** (recommended for PyTorch + whisper compatibility)
-- (Optional) NVIDIA GPU with CUDA for accelerated inference
+   ```matlab
+   [x, fs] = audioread("reference.wav");
+   [x_clean, fs] = preprocess_signal(x, fs);
+   [mel_matrix, S, f, t] = stft_analysis(x_clean, fs);
+   ```
 
-### Local setup
+4. Launch the UI:
 
-```bash
-cd voice-cloner-pipeline
+   ```matlab
+   app = VoiceClonerApp;
+   ```
 
-# 1. Create & activate a virtual environment
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/macOS
-source .venv/bin/activate
+5. Download model weights in MATLAB Online with the source URL supplied by the model provider:
 
-# 2. Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-```
+   ```matlab
+   download_weights("https://example.invalid/model.onnx");
+   ```
 
-> **F5-TTS note**: if the PyPI `f5-tts` package is unavailable, install from
-> source:
-> ```bash
-> pip install git+https://github.com/SWivid/F5-TTS.git
-> ```
+The ONNX input tensor names and shapes are model-specific. Update `synthesize_features.m` to match the selected export before enabling inference. Model weights, audio files, and MATLAB binary artifacts are excluded by `.gitignore`.
 
----
+## Validation
 
-## 🚀 Usage
-
-### 1. Start the FastAPI backend
-
-```bash
-python main.py --reload
-```
-
-Or directly with Uvicorn:
-
-```bash
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Verify: <http://localhost:8000/health>
-
-Interactive docs: <http://localhost:8000/docs>
-
-### 2. Launch the Streamlit UI
-
-In a second terminal:
-
-```bash
-streamlit run ui/app.py
-```
-
-- Set the **API Endpoint URL** to `http://localhost:8000/api/clone` (default).
-- Upload or record 15–30s of reference speech.
-- Type the target text and click **Generate Cloned Voice**.
-- Play / download the returned WAV.
-
-### 3. (Optional) Docker
-
-```bash
-docker build -f docker/Dockerfile -t voice-cloner .
-docker run --gpus all -p 8000:8000 voice-cloner
-```
-
-### 4. (Optional) Colab GPU + ngrok
-
-Open `notebooks/colab_server.ipynb` on a **GPU runtime** and run all cells.
-The notebook installs dependencies, starts uvicorn on port 8000, and exposes
-it via **pyngrok**. Paste the printed ngrok URL into the Streamlit sidebar.
-
----
-
-## 🔌 API Reference
-
-### `POST /api/clone`
-
-Multipart form data:
-
-| Field         | Type        | Description                          |
-|---------------|-------------|--------------------------------------|
-| `ref_audio`   | File        | Reference audio (WAV/MP3/M4A/FLAC…). |
-| `target_text` | Form string | Text to synthesize in the cloned voice. |
-
-**Response**: `audio/wav` — the generated cloned voice clip.
-
-### `GET /health`
-
-Liveness probe returning backend & device info.
-
-```json
-{
-  "status": "ok",
-  "service": "zero-shot-voice-cloner",
-  "backend": "f5-tts",
-  "device": "cuda"
-}
-```
-
----
-
-## 🧠 Architecture
-
-| Layer   | Module                 | Responsibility                                                        |
-|---------|------------------------|-----------------------------------------------------------------------|
-| DSP     | `src/audio/cleaner.py` | Mono downmix, resample to 24kHz, spectral-gating denoise, trim, peak normalize. |
-| ASR     | `src/audio/transcriber.py` | Whisper `base` transcription of the cleaned reference → `ref_text`.   |
-| TTS     | `src/models/tts_engine.py` | Zero-shot synthesis (F5-TTS preferred, XTTS-v2 fallback, `mock` for CPU testing). |
-| API     | `src/api/main.py`      | FastAPI + CORS, orchestrates clean → transcribe → synthesize → WAV.    |
-| UI      | `ui/app.py`            | Streamlit test harness (upload/record + text + player).               |
-
-### TTS backend fallback
-
-`VoiceClonerEngine` auto-detects installed backends:
-
-1. **`f5-tts`** — preferred modern zero-shot TTS.
-2. **`xtts`** — Coqui XTTS-v2 (multilingual).
-3. **`mock`** — generates a placeholder sine-wave WAV so the full pipeline can
-   be exercised end-to-end on machines without a TTS model installed.
-
----
-
-## 🧪 Testing the pipeline without a GPU
-
-Without a GPU or TTS model, the API still works end-to-end using the **mock**
-backend:
-
-```bash
-curl -X POST http://localhost:8000/api/clone \
-  -F "ref_audio=@sample.wav" \
-  -F "target_text=Hello, this is a test of the voice cloning pipeline." \
-  -o cloned_voice.wav
-```
-
----
-
-## 📝 Notes
-
-- The first request downloads the Whisper and TTS model weights (can take
-  several minutes) — subsequent calls are fast.
-- Use clean, single-speaker reference audio for the best cloning quality.
-- Models are loaded lazily and cached as process-level singletons to avoid
-  re-loading on every request.
-
-## 📄 License
-
-MIT — free to use and modify.
-
+MATLAB execution is intentionally not performed on the local machine. Run the quick-start commands and model-specific inference checks in MATLAB Online.
