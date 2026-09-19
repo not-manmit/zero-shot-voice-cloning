@@ -1,142 +1,118 @@
-# Zero-Shot Voice Cloning in MATLAB
+# Zero-Shot Voice Cloning in MATLAB (MATLAB-Only, No Python at Runtime)
 
-This repository implements a MATLAB-only zero-shot voice cloning pipeline based on a SpeechT5 text-to-speech backbone and a learned x-vector speaker encoder. The project is structured for MATLAB Online execution and avoids Python-based inference or local model conversion.
+MATLAB-only zero-shot TTS using **SpeechT5** (Xenova ONNX exports of `microsoft/speecht5_tts`) + **CAM++ speaker encoder** (`openspeech/wespeaker-models`) + **HiFi-GAN** (`Xenova/speecht5_hifigan`). No PyTorch, no Conda, no local Python needed at inference – all execution happens in **MATLAB Online**.
 
-## Final architecture
+Pipeline:
 
-Reference audio
-  -> preprocessing
-  -> x-vector speaker encoder
-  -> speaker embedding
-  -> text tokenizer
-  -> SpeechT5 encoder
-  -> SpeechT5 autoregressive decoder
-  -> acoustic/Mel features
-  -> neural vocoder
-  -> waveform
-  -> playback and WAV export
+```
+Ref audio (any rate) -> preprocess 16kHz mono denoise -> CAM++ fbank80 + CMN -> 512-dim L2 x-vector
+                                                              |
+Text -> SpeechT5 tokenizer (81 vocab, BOS/EOS) -> SpeechT5 encoder (768) -> autoregressive decoder + past KV (80-bin Mel)
+                                                                                              |
+                                                                                         Mel [80,T]
+                                                                                              |
+                                                                                         HiFi-GAN -> waveform 16kHz -> play / save WAV
+```
 
-## Required MATLAB products
+## Exact models (real URLs, verified on Hugging Face)
 
-- MATLAB
-- Signal Processing Toolbox
-- Audio Toolbox
-- Statistics and Machine Learning Toolbox
-- Deep Learning Toolbox
-- Parallel Computing Toolbox (optional, only if ONNX runtime benefits from it)
+| File (canonical) | Purpose | Source repo | URL | Size |
+|---|---|---|---|---|
+| `models/speecht5/encoder_model.onnx` | SpeechT5 encoder | Xenova/speecht5_tts | https://huggingface.co/Xenova/speecht5_tts/resolve/main/onnx/encoder_model.onnx | 343 MB |
+| `models/speecht5/decoder_model.onnx` | SpeechT5 decoder step 1 | Xenova/speecht5_tts | https://huggingface.co/Xenova/speecht5_tts/resolve/main/onnx/decoder_model.onnx | 238 MB |
+| `models/speecht5/decoder_with_past_model.onnx` | SpeechT5 decoder with KV cache | Xenova/speecht5_tts | https://huggingface.co/Xenova/speecht5_tts/resolve/main/onnx/decoder_with_past_model.onnx | 210 MB |
+| `models/speecht5/vocoder_model.onnx` | HiFi-GAN | Xenova/speecht5_hifigan | https://huggingface.co/Xenova/speecht5_hifigan/resolve/main/onnx/model.onnx | 55.4 MB |
+| `models/xvector/xvector_encoder.onnx` | CAM++ 512-dim speaker encoder | openspeech/wespeaker-models | https://huggingface.co/openspeech/wespeaker-models/resolve/main/voxceleb_CAM++.onnx | 29.3 MB |
 
-## Canonical model layout
+Total ~875 MB (fits in 20 GB MATLAB Drive). Quantized variants (`*_quantized.onnx`, `*_int8.onnx`) from same repos can be used if storage-constrained – rename to same canonical names.
 
-All model files must live under the repository root and use the same layout throughout the codebase:
+Licenses: MIT (SpeechT5/HiFi-GAN) + Apache-2.0/CC-BY-4.0 (CAM++, Xenova tooling). Check each repo before redistribution.
 
-```text
+## Canonical layout (must match across all code)
+
+```
 models/
-├── speecht5/
-│   ├── encoder_model.onnx
-│   ├── decoder_model.onnx
-│   ├── decoder_with_past_model.onnx
-│   ├── vocoder_model.onnx
-│   └── tokenizer_vocab.json   (optional, downloaded if available)
-└── xvector/
-    ├── xvector_encoder.onnx
-    └── cmu_arctic_xvectors.mat
+  speecht5/
+    encoder_model.onnx
+    decoder_model.onnx
+    decoder_with_past_model.onnx
+    vocoder_model.onnx
+  xvector/
+    xvector_encoder.onnx
 ```
 
-## MATLAB Online workflow
+`pipeline_config.m` defines all paths; `model_contract.m` defines exact input/output names/shapes; `download_weights.m` downloads to exactly these paths.
 
-1. Open MATLAB Online.
-2. Clone or pull the repository.
-3. Change into the project folder:
+## MATLAB requirements (used, not invented)
 
-   ```matlab
-   cd("zero-shot-voice-cloning-main")
-   ```
+- MATLAB R2024a+ recommended (ONNX opset 14 support)
+- Audio Toolbox (audioread/write, sound, audiorecorder)
+- Signal Processing Toolbox (stft, istft, resample, hamming/hann)
+- Deep Learning Toolbox
+- **Deep Learning Toolbox Converter for ONNX Model Format** (for `importONNXNetwork`, `dlarray`, `dlnetwork`)
+- Parallel Computing Toolbox – optional (GPU not required)
 
-4. Run the setup script:
+Check with: `check_requirements`  – reports exactly what is missing.
 
-   ```matlab
-   run("scripts/setup_matlab_online.m")
-   ```
+## MATLAB Online – one-shot setup
 
-5. Validate model compatibility:
+```matlab
+% 1. Clone (or upload) and cd
+cd("zero-shot-voice-cloning-main")  % name may vary on Drive
 
-   ```matlab
-   validate_models
-   ```
+% 2. Setup (paths + dirs + download missing weights + validation)
+run("scripts/setup_matlab_online.m")
 
-6. Launch the app:
+% 3. Validate contracts in detail
+validate_models
 
-   ```matlab
-   VoiceClonerApp
-   ```
-
-7. Record or upload a reference voice, enter target text, and click Generate.
-8. Play or save the output waveform with `sound()` or `audiowrite()`.
-9. Run the test suite:
-
-   ```matlab
-   run("tests/test_tokenizer.m")
-   run("tests/test_speaker_encoder.m")
-   run("tests/test_model_loading.m")
-   run("tests/test_vocoder.m")
-   run("tests/test_end_to_end.m")
-   ```
-
-## Repository layout
-
-```text
-.
-├── CONTEXT.md
-├── README.md
-├── WORKFLOW.md
-├── docs/
-│   └── ARCHITECTURE.md
-├── models/
-│   ├── speecht5/
-│   └── xvector/
-├── scripts/
-│   ├── download_weights.m
-│   └── setup_matlab_online.m
-├── src/
-│   ├── config/
-│   │   └── pipeline_config.m
-│   ├── dsp/
-│   │   ├── preprocess_signal.m
-│   │   └── stft_analysis.m
-│   ├── inference/
-│   │   └── generate_voice.m
-│   ├── models/
-│   │   ├── load_onnx_engine.m
-│   │   ├── synthesize_features.m
-│   │   └── validate_models.m
-│   ├── speaker/
-│   │   └── extract_speaker_embedding.m
-│   ├── text/
-│   │   └── tokenize_text.m
-│   ├── utils/
-│   │   └── check_requirements.m
-│   └── vocoder/
-│       └── reconstruct_waveform.m
-├── tests/
-│   ├── test_tokenizer.m
-│   ├── test_speaker_encoder.m
-│   ├── test_model_loading.m
-│   ├── test_vocoder.m
-│   └── test_end_to_end.m
-└── ui/
-    └── VoiceClonerApp.m
+% 4. Launch UI
+VoiceClonerApp
 ```
 
-## Model download and setup
+`setup_matlab_online.m` will:
+- add `src`, `ui`, `scripts` to path
+- create `models/speecht5` and `models/xvector`
+- download only missing ONNX from the real URLs above (via `websave`)
+- call `validate_models` which imports each ONNX and checks input/output names
 
-The repository does not store large ONNX model weights in Git. The setup script checks and downloads only missing assets into the canonical model directories. This is executed inside MATLAB Online, not on the developer laptop.
+If `validate_models` reports `ok=false`, do not click Generate – see the error (e.g. missing Support Package, opset too new).
 
-## Important limitation
+## App usage
 
-This repository is intentionally written to use MATLAB-native ONNX import and runtime APIs. The exact model contract is validated at runtime by inspecting the imported network. If a particular ONNX export is incompatible with the local MATLAB version or unsupported operators, the validation function reports the exact failure rather than pretending the model works.
+1. **Reference voice**: Record (Record → Stop) or Upload WAV (any rate, automatically resampled 16 kHz). Must be >=1 s and non-silent; 3-5 s recommended.
+2. **Target text**: English, lowercased internally, 450 token limit (truncates with warning).
+3. **Generate**: Runs `generate_voice` which shows tokenizing → encoder → autoregressive decoder (with past KV) → vocoder. Reuses the 512-dim speaker embedding if reference unchanged.
+4. **Play / Save**: Play via `sound`, Save via `audiowrite` (16 kHz WAV).
 
-## Notes
+`generate_voice` returns: `waveform [N,1]`, `sampleRate`, `speakerEmbedding [1,512]`, `acousticFeatures [80,T]`, `tokenIds`, `attentionMask`, `metrics` (pre/spk/tok/enc+dec/voc/total seconds), `metadata`.
 
-- The final system uses 16 kHz as the SpeechT5 model rate.
-- The pipeline is designed to avoid repeated model reloads and to reuse cached ONNX runtime objects across generations.
-- No local Python environment, conversion scripts, or external inference server is required.
+## Tests (use MATLAB unittest assertions)
+
+```matlab
+run("tests/test_tokenizer.m")
+run("tests/test_speaker_encoder.m")   % needs models present
+run("tests/test_model_loading.m")     % validates all ONNX contracts
+run("tests/test_vocoder.m")
+run("tests/test_end_to_end.m")       % ref (synthetic) -> embedding -> TTS -> vocoder -> wav
+```
+
+If `Required model assets are unavailable` is printed, the test correctly reports missing assets rather than silently passing.
+
+## Sample rate
+
+Everything is 16 kHz. `pipeline_config.fs = target_fs = hifigan_sr = 16000`. `stft_analysis` uses N=1024, hop=256 (16 ms), win=1024 (64 ms), 80 mels 80-7600 Hz, natural log. CAM++ front-end uses 25 ms/10 ms, 80 mels 20-8000 Hz, CMN. No 24 kHz exists anywhere.
+
+## Limitations (honest)
+
+- Xenova SpeechT5 ONNX is an export of the base LibriTTS checkpoint – prosody limited; long sentences may degrade after ~500 Mel frames (max_decoder_steps).
+- CAM++ generalises to unseen speakers but is not finetuned on SpeechT5 speaker space; embedding is L2-projected and genuinely conditions the decoder (checked at every step).
+- MATLAB `importONNXNetwork` supports opset <=17; the fp32 Xenova exports are opset 14 – compatible with R2023b+. Quantized exports (8-bit) require newer MATLAB and may not import.
+- No training, no fine-tuning, no GPU required.
+- All inference is CPU in MATLAB Online; expect ~5-20 s per sentence depending on length.
+
+## Docs
+
+- `docs/ARCHITECTURE.md` – contract details
+- `src/models/model_contract.m` – machine-readable contract
+- `src/config/pipeline_config.m` – sample rate, mel, token, model paths
