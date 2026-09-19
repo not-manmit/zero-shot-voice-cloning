@@ -6,10 +6,10 @@ function report = validate_models(cfg)
 %
 %   For every model verifies:
 %     - file exists
-%     - importONNXNetwork succeeds
+%     - importONNXNetwork succeeds (dlnetwork first, then dag)
 %     - expected input/output names and dimensions are present
-%     - tensor types are float32/int64 as per contract
-%   Distinguishes MODEL FILE EXISTS vs MODEL CAN ACTUALLY BE USED.
+%     - distinguishes legacy int BOS vs verified float mel contract for decoder
+%     - past tensor count symmetry, use_cache_branch presence
 
 if nargin < 1 || isempty(cfg) || ~isfield(cfg,'paths')
     cfg = pipeline_config();
@@ -29,7 +29,7 @@ for i = 1:numel(modelNames)
     entry = struct('path', path, 'exists', false, 'ok', false, ...
         'inputs', {{}}, 'outputs', {{}}, ...
         'inputDetails', {{}}, 'outputDetails', {{}}, ...
-        'contract', c.(cKey), 'error', '');
+        'contract', c.(cKey), 'error', '', 'legacyFallback', false);
 
     if ~isfile(path)
         entry.error = sprintf('Model file missing: %s (run scripts/download_weights.m or setup_matlab_online.m)', path);
@@ -41,7 +41,6 @@ for i = 1:numel(modelNames)
     entry.exists = true;
 
     try
-        % Try dlnetwork import first (preserves dynamic axes for transformers)
         try
             net = importONNXNetwork(path, OutputLayerType="regression", TargetNetwork="dlnetwork");
         catch
@@ -53,22 +52,79 @@ for i = 1:numel(modelNames)
         entry.inputDetails = describe_io(net, 'input');
         entry.outputDetails = describe_io(net, 'output');
 
-        % Compare against contract — explicit exact names, case-insensitive
-        expectedIn = {c.(cKey).inputs.name};
-        % For decoder_with_past, past tensors may be expanded as past_key_values.0 etc — check prefix
-        if strcmp(name,'decoder_with_past')
-            core = expectedIn(1:4);
-            missingCore = setdiff(lower(core), lower(entry.inputs));
-            if ~isempty(missingCore)
+        % Compare against contract — handle decoder float vs legacy
+        if strcmp(name,'decoder')
+            % Check float primary first
+            expectedFloat = {c.(cKey).inputs.name};
+            expectedLegacy = {c.(cKey).inputs_legacy.name};
+            lowerIn = lower(entry.inputs);
+            isFloat = any(contains(lowerIn,'output_sequence')) || any(contains(lowerIn,'decoder_input_values')) || any(contains(lowerIn,'input_values'));
+            isLegacy = any(strcmp(lowerIn,'input_ids')) && ~isFloat;
+            if isFloat
+                missing = setdiff(lower(expectedFloat), lowerIn);
+                if ~isempty(missing)
+                    entry.ok = false;
+                    entry.error = sprintf('Decoder (float) input name mismatch. Expected [%s] Found [%s]', strjoin(expectedFloat,','), strjoin(entry.inputs,','));
+                    overallOk = false;
+                else
+                    fprintf('[validate_models] decoder: float Mel contract OK (output_sequence)\n');
+                end
+            elseif isLegacy
+                entry.legacyFallback = true;
+                missing = setdiff(lower(expectedLegacy), lowerIn);
+                if ~isempty(missing)
+                    entry.ok = false;
+                    entry.error = sprintf('Decoder (legacy int) input name mismatch. Expected [%s] Found [%s]', strjoin(expectedLegacy,','), strjoin(entry.inputs,','));
+                    overallOk = false;
+                else
+                    fprintf('[validate_models] decoder: LEGACY int BOS contract detected — synthesize_features will use fallback but upgrade to float export recommended.\n');
+                end
+            else
                 entry.ok = false;
-                entry.error = sprintf('Decoder_with_past missing core inputs: %s (found %s)', strjoin(missingCore,','), strjoin(entry.inputs,','));
+                entry.error = sprintf('Decoder input name mismatch. Neither float nor legacy. Found [%s]', strjoin(entry.inputs,','));
                 overallOk = false;
             end
-            % warn if past tensor count looks wrong
-            nPastInputs = numel(entry.inputs) - 4;
-            nPastOutputs = numel(entry.outputs) - 1; % minus logits
-            fprintf('[validate_models] decoder_with_past past tensors: %d inputs / %d outputs\n', nPastInputs, nPastOutputs);
+            % Output check: expect spectrum/prob (2) or legacy logits (1)
+            lowerOut = lower(entry.outputs);
+            hasSpectrum = any(contains(lowerOut,'spectrum')) || any(contains(lowerOut,'feat'));
+            hasProb = any(contains(lowerOut,'prob')) || any(contains(lowerOut,'logit'));
+            if hasSpectrum || hasProb
+                fprintf('[validate_models] decoder outputs: spectrum/prob contract (rf=2)\n');
+            else
+                fprintf('[validate_models] decoder outputs: %s (check if packed 81 legacy)\n', strjoin(entry.outputs,','));
+            end
+            nPastOutputs = max(0, numel(entry.outputs) - 2); % minus spectrum,prob
+            fprintf('[validate_models] decoder past outputs: %d\n', nPastOutputs);
+        elseif strcmp(name,'decoder_with_past')
+            % core 4 float + past
+            expectedCore = {c.(cKey).inputs.name}; expectedCore = expectedCore(1:4);
+            lowerIn = lower(entry.inputs);
+            hasUseCache = any(contains(lowerIn,'use_cache'));
+            missingCore = setdiff(lower(expectedCore), lowerIn);
+            % Allow legacy core too
+            if ~isempty(missingCore)
+                legacyCore = lower({c.(cKey).inputs_legacy.name}); legacyCore = legacyCore(1:4);
+                missingLegacy = setdiff(legacyCore, lowerIn);
+                if isempty(missingLegacy)
+                    entry.legacyFallback = true;
+                    fprintf('[validate_models] decoder_with_past: legacy int core detected\n');
+                else
+                    entry.ok = false;
+                    entry.error = sprintf('Decoder_with_past missing core inputs: %s (found %s)', strjoin(missingCore,','), strjoin(entry.inputs,','));
+                    overallOk = false;
+                end
+            end
+            nPastInputs = numel(entry.inputs) - 4 - hasUseCache;
+            nPastOutputs = numel(entry.outputs) - 2; % minus spectrum,prob (or 1 if legacy)
+            if nPastOutputs < 0
+                nPastOutputs = numel(entry.outputs) - 1;
+            end
+            fprintf('[validate_models] decoder_with_past past tensors: %d inputs / %d outputs (use_cache_branch %d)\n', nPastInputs, nPastOutputs, hasUseCache);
+            if nPastInputs ~= nPastOutputs && nPastOutputs > 0
+                fprintf('[validate_models] Warning: past input/output count mismatch %d vs %d\n', nPastInputs, nPastOutputs);
+            end
         else
+            expectedIn = {c.(cKey).inputs.name};
             missing = setdiff(lower(expectedIn), lower(entry.inputs));
             extra = setdiff(lower(entry.inputs), lower(expectedIn));
             if ~isempty(missing) || ~isempty(extra)
@@ -76,7 +132,6 @@ for i = 1:numel(modelNames)
                 entry.error = sprintf('Input name mismatch for %s. Expected [%s] Found [%s]', name, strjoin(expectedIn,','), strjoin(entry.inputs,','));
                 overallOk = false;
             end
-            % Also check output count roughly
             expectedOut = {c.(cKey).outputs.name};
             if numel(entry.outputs) < numel(expectedOut)
                 entry.ok = false;
@@ -118,7 +173,6 @@ try
         layers = net.Layers;
         for k=1:numel(names)
             s.name = names(k);
-            % try to find corresponding input layer size
             lyrIdx = find(contains({layers.Name}, names(k)),1);
             if ~isempty(lyrIdx) && isprop(layers(lyrIdx),'InputSize')
                 s.shape = mat2str(layers(lyrIdx).InputSize);
