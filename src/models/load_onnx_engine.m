@@ -68,24 +68,22 @@ t_start = tic;
                 "Run scripts/setup_matlab_online.m to download it.", path_);
         end
         fprintf("  [%s] importing %s ...\n", label, path_);
+        % Xenova exports use opset 14-17; importONNXNetwork supports up to 17 in R2024a.
+        % Use regression output type and preserve dynamic axes.
         try
-            net = importONNXNetwork(path_, OutputLayerType="regression");
-        catch ME
-            % Try as a function network (preferred for ONNX with dynamic axes)
+            net = importONNXNetwork(path_, OutputLayerType="regression", TargetNetwork="dlnetwork");
+        catch ME1
             try
-                net = importONNXFunction(path_, label);
-                % Wrap as dlnetwork for consistent predict() API
-                net = dlnetwork(net);
+                net = importONNXNetwork(path_, OutputLayerType="regression");
             catch
                 error("load_onnx_engine:ImportFailed", ...
                     "importONNXNetwork failed for %s.\n" + ...
                     "Reason: %s\n" + ...
-                    "Check that Deep Learning Toolbox and its ONNX " + ...
-                    "import support are installed, and that the ONNX " + ...
-                    "file is valid (opset ≤ 17).", path_, ME.message);
+                    "Check that Deep Learning Toolbox Converter for ONNX is installed, and that the ONNX " + ...
+                    "file is valid (opset ≤ 17). The Xenova fp32 exports are opset 14.", path_, ME1.message);
             end
         end
-        fprintf("  [%s] OK\n", label);
+        fprintf("  [%s] OK inputs:%s\n", label, strjoin(cellstr(net.InputNames),','));
     end
 
 % -----------------------------------------------------------------------
@@ -98,6 +96,8 @@ m.decoder    = load_one("decoder",    cfg.paths.decoder);
 m.decoder_kv = load_one("decoder_kv", cfg.paths.decoder_kv);
 m.vocoder    = load_one("vocoder",    cfg.paths.vocoder);
 m.spk_encoder = load_one("spk_encoder", cfg.paths.spk_encoder);
+m.contract   = model_contract();
+m.cfg        = cfg;
 
 % -----------------------------------------------------------------------
 % Verify speaker embedding lookup table is present
