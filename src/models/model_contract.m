@@ -90,4 +90,9 @@ contract.spk_encoder.outputs = struct( ...
 );
 contract.spk_encoder.notes = 'Raw waveform -> fbank80 -> CMN -> ONNX -> L2 normalise. Chunk long audio.';
 
+% --- Cross-check against pipeline_config onnx field (single source of truth)
+cfgOnnx = cfg.onnx;
+assert(isequal(cfgOnnx.encoder_inputs, {contract.encoder.inputs.name}), 'pipeline_config vs model_contract encoder inputs mismatch');
+assert(isequal(cfgOnnx.spk_inputs, {contract.spk_encoder.inputs.name}), 'pipeline_config vs model_contract spk inputs mismatch');
+
 end
