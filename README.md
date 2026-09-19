@@ -1,120 +1,142 @@
-# Zero-Shot Voice Cloning System
+# Zero-Shot Voice Cloning in MATLAB
 
-A MATLAB application for generating speech in a speaker's voice from a short reference recording and target text. The system combines digital signal processing, speaker representation, ONNX-based model inference, and waveform reconstruction in a modular pipeline.
+This repository implements a MATLAB-only zero-shot voice cloning pipeline based on a SpeechT5 text-to-speech backbone and a learned x-vector speaker encoder. The project is structured for MATLAB Online execution and avoids Python-based inference or local model conversion.
 
-## Features
+## Final architecture
 
-- Load a WAV reference recording.
-- Convert audio to mono and resample it to 24 kHz.
-- Reduce stationary background noise and normalize signal amplitude.
-- Generate Hann-windowed STFT and Mel-spectrogram features.
-- Import a compatible zero-shot text-to-speech model through ONNX.
-- Reconstruct an audio waveform from synthesized acoustic features.
-- View the reference waveform and Mel-spectrogram in the application UI.
+Reference audio
+  -> preprocessing
+  -> x-vector speaker encoder
+  -> speaker embedding
+  -> text tokenizer
+  -> SpeechT5 encoder
+  -> SpeechT5 autoregressive decoder
+  -> acoustic/Mel features
+  -> neural vocoder
+  -> waveform
+  -> playback and WAV export
 
-## Requirements
+## Required MATLAB products
 
-- MATLAB Online or desktop MATLAB
-- Audio Toolbox
-- Deep Learning Toolbox
+- MATLAB
 - Signal Processing Toolbox
-- A compatible zero-shot TTS model exported in ONNX format
+- Audio Toolbox
+- Statistics and Machine Learning Toolbox
+- Deep Learning Toolbox
+- Parallel Computing Toolbox (optional, only if ONNX runtime benefits from it)
 
-## Project Structure
+## Canonical model layout
+
+All model files must live under the repository root and use the same layout throughout the codebase:
+
+```text
+models/
+├── speecht5/
+│   ├── encoder_model.onnx
+│   ├── decoder_model.onnx
+│   ├── decoder_with_past_model.onnx
+│   ├── vocoder_model.onnx
+│   └── tokenizer_vocab.json   (optional, downloaded if available)
+└── xvector/
+    ├── xvector_encoder.onnx
+    └── cmu_arctic_xvectors.mat
+```
+
+## MATLAB Online workflow
+
+1. Open MATLAB Online.
+2. Clone or pull the repository.
+3. Change into the project folder:
+
+   ```matlab
+   cd("zero-shot-voice-cloning-main")
+   ```
+
+4. Run the setup script:
+
+   ```matlab
+   run("scripts/setup_matlab_online.m")
+   ```
+
+5. Validate model compatibility:
+
+   ```matlab
+   validate_models
+   ```
+
+6. Launch the app:
+
+   ```matlab
+   VoiceClonerApp
+   ```
+
+7. Record or upload a reference voice, enter target text, and click Generate.
+8. Play or save the output waveform with `sound()` or `audiowrite()`.
+9. Run the test suite:
+
+   ```matlab
+   run("tests/test_tokenizer.m")
+   run("tests/test_speaker_encoder.m")
+   run("tests/test_model_loading.m")
+   run("tests/test_vocoder.m")
+   run("tests/test_end_to_end.m")
+   ```
+
+## Repository layout
 
 ```text
 .
+├── CONTEXT.md
+├── README.md
+├── WORKFLOW.md
+├── docs/
+│   └── ARCHITECTURE.md
+├── models/
+│   ├── speecht5/
+│   └── xvector/
 ├── scripts/
-│   └── download_weights.m
+│   ├── download_weights.m
+│   └── setup_matlab_online.m
 ├── src/
+│   ├── config/
+│   │   └── pipeline_config.m
 │   ├── dsp/
 │   │   ├── preprocess_signal.m
 │   │   └── stft_analysis.m
+│   ├── inference/
+│   │   └── generate_voice.m
 │   ├── models/
 │   │   ├── load_onnx_engine.m
-│   │   └── synthesize_features.m
+│   │   ├── synthesize_features.m
+│   │   └── validate_models.m
+│   ├── speaker/
+│   │   └── extract_speaker_embedding.m
+│   ├── text/
+│   │   └── tokenize_text.m
+│   ├── utils/
+│   │   └── check_requirements.m
 │   └── vocoder/
 │       └── reconstruct_waveform.m
+├── tests/
+│   ├── test_tokenizer.m
+│   ├── test_speaker_encoder.m
+│   ├── test_model_loading.m
+│   ├── test_vocoder.m
+│   └── test_end_to_end.m
 └── ui/
     └── VoiceClonerApp.m
 ```
 
-## Quick Start
+## Model download and setup
 
-1. Open the project in MATLAB.
-2. Add the project folders to the MATLAB path:
+The repository does not store large ONNX model weights in Git. The setup script checks and downloads only missing assets into the canonical model directories. This is executed inside MATLAB Online, not on the developer laptop.
 
-   ```matlab
-   addpath(genpath(pwd));
-   ```
+## Important limitation
 
-3. Launch the application:
+This repository is intentionally written to use MATLAB-native ONNX import and runtime APIs. The exact model contract is validated at runtime by inspecting the imported network. If a particular ONNX export is incompatible with the local MATLAB version or unsupported operators, the validation function reports the exact failure rather than pretending the model works.
 
-   ```matlab
-   app = VoiceClonerApp;
-   ```
+## Notes
 
-4. Use **Load reference** to select a WAV file.
-5. Enter the sentence to synthesize.
-6. Select **Synthesize** to preprocess the reference and generate its acoustic features.
-
-## Processing Pipeline
-
-```text
-Reference WAV
-     │
-     ▼
-Preprocessing
-     │  mono, resampling, noise suppression, normalization
-     ▼
-STFT and Mel Features ──► Speaker Representation
-                              │
-Target Text ────────────────┐  │
-                            ▼  ▼
-                         ONNX TTS Model
-                              │
-                              ▼
-                       Waveform Reconstruction
-                              │
-                              ▼
-                         Synthesized Speech
-```
-
-The main reusable functions are:
-
-- `preprocess_signal`: prepares the reference signal at 24 kHz.
-- `stft_analysis`: computes the STFT and Mel-spectrogram matrix.
-- `load_onnx_engine`: imports the selected ONNX network.
-- `synthesize_features`: adapts target text and speaker data to the model.
-- `reconstruct_waveform`: produces a time-domain waveform from acoustic features.
-
-## Model Weights
-
-Model weights are not stored in the repository. Download them into the MATLAB Drive environment with:
-
-```matlab
-download_weights("https://your-model-host.example/model.onnx", "tts_model.onnx");
-```
-
-The model should be placed at:
-
-```text
-models/weights/tts_model.onnx
-```
-
-The ONNX input names, tensor shapes, tokenizer, and speaker-embedding format depend on the selected model. Update `synthesize_features.m` to match the model export before running inference.
-
-## Example DSP Usage
-
-```matlab
-[x, fs] = audioread("reference.wav");
-[x_clean, fs] = preprocess_signal(x, fs);
-[mel_matrix, S, f, t] = stft_analysis(x_clean, fs);
-
-plot(t, x_clean);
-xlabel("Time (s)");
-ylabel("Amplitude");
-title("Preprocessed Reference Audio");
-```
-
-Audio files, model weights, generated outputs, and MATLAB binary artifacts are excluded from version control.
+- The final system uses 16 kHz as the SpeechT5 model rate.
+- The pipeline is designed to avoid repeated model reloads and to reuse cached ONNX runtime objects across generations.
+- No local Python environment, conversion scripts, or external inference server is required.
