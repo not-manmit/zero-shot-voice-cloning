@@ -144,28 +144,16 @@ if ~any(strcmpi(names,'features'))
     error("extract_speaker_embedding:ContractMismatch", ...
         "Speaker encoder ONNX expected input 'features' but found [%s]. Check voxceleb_CAM++.onnx export.", strjoin(names,','));
 end
-% Wespeaker CAM++ expects [B,T,80] float32. MATLAB dlnetwork layout: use 'SCB' where S=80 is feature dim
-% Try canonical layouts in order: TCS (time-channel-batch) equivalent handling
-% Most reliable: reshape to [1,T,80] and use 'CBT' or 'SCB' — validate at runtime
-% We use explicit dlarray with dimension labels matching ONNX.
-% Xenova/Wespeaker exports are typically [batch, seq, feat] => [B,T,80]
+% Verified: Wespeaker CAM++ expects [B,T,80] float32, input name 'features', single verified layout CBT [1,T,80].
+% Fallback removed — production uses one contract; diagnose_onnx must confirm.
 try
-    % Primary: [B,T,80] as BTF layout — MATLAB expects batch last for some dlnetworks
-    % Use 'CBT' where C=feat, B=batch, T=time workaround: single batch
     inp = dlarray(reshape(x_f32, 1, size(x_f32,1), size(x_f32,2)), 'CBT');
     out = predict(net, inp);
     emb_raw = extractdata(out);
 catch ME
-    % Secondary: try plain CB for flattened case (some exports flatten time)
-    try
-        inp2 = dlarray(single(fbank), 'CB');
-        out = predict(net, inp2);
-        emb_raw = extractdata(out);
-    catch ME2
-        error("extract_speaker_embedding:InferenceFailed", ...
-            "CAM++ ONNX inference failed.\nPrimary layout [1,T,80] error: %s\nFallback CB error: %s\nCheck that %s is voxceleb_CAM++.onnx (512-dim).", ...
-            ME.message, ME2.message, cfg.paths.spk_encoder);
-    end
+    error("extract_speaker_embedding:InferenceFailed", ...
+        "CAM++ ONNX inference failed with verified layout [1,T,80] CBT.\nError: %s\nCheck that %s is voxceleb_CAM++.onnx (512-dim) and Run diagnose_onnx to confirm input name ''features''.", ...
+        ME.message, cfg.paths.spk_encoder);
 end
 emb = single(emb_raw(:)');
 if numel(emb) ~= cfg.spk_emb_dim

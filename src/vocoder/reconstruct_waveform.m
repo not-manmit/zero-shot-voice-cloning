@@ -52,9 +52,8 @@ if ~any(strcmpi(names,'spectrogram'))
     error('reconstruct_waveform:ContractMismatch','Vocoder expected input ''spectrogram'' but found [%s]. Check models/speecht5/vocoder_model.onnx is Xenova/speecht5_hifigan model.onnx', strjoin(names,','));
 end
 mel_batched = single(reshape(mel, 1, size(mel,1), size(mel,2))); % [1,80,T]
-voc_in = dlarray(mel_batched, 'SCB');
-% Note: some MATLAB versions import as [B,80,T] with layout 'SCB' or 'CBT' — validate at runtime
-% via validate_models. If predict fails, the error message will guide the fix.
+voc_in = dlarray(mel_batched, 'SCB'); % verified single layout [B,80,T] SCB; diagnose_onnx must confirm
+
 
 try
     out = predict(models.vocoder, voc_in);

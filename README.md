@@ -2,16 +2,16 @@
 
 MATLAB-only zero-shot TTS using **SpeechT5** (Xenova ONNX exports of `microsoft/speecht5_tts`) + **CAM++ speaker encoder** (`openspeech/wespeaker-models`) + **HiFi-GAN** (`Xenova/speecht5_hifigan`). No PyTorch, no Conda, no local Python needed at inference – all execution happens in **MATLAB Online**.
 
-Pipeline:
+Pipeline (verified 2026-05-11 against HF `modeling_speecht5.py` + `tokenizer.json` + `config.json`):
 
 ```
-Ref audio (any rate) -> preprocess 16kHz mono denoise -> CAM++ fbank80 + CMN -> 512-dim L2 x-vector
+Ref audio (any rate) -> preprocess 16kHz mono denoise -> CAM++ fbank80 + CMN [1,T,80] -> 512-dim L2 x-vector
                                                               |
-Text -> SpeechT5 tokenizer (81 vocab, BOS/EOS) -> SpeechT5 encoder (768) -> autoregressive decoder + past KV (80-bin Mel)
+Text -> SpeechT5 SentencePiece-char tokenizer (81 vocab, ▁ metaspace, case-preserved, EOS only, no BOS) -> SpeechT5 encoder (768) -> autoregressive decoder (zero Mel [1,1,80] start, rf=2 frames/step, spectrum+prob heads + past KV)
                                                                                               |
-                                                                                         Mel [80,T]
+                                                                                         Mel [80,T] (rf=2, natural log)
                                                                                               |
-                                                                                         HiFi-GAN -> waveform 16kHz -> play / save WAV
+                                                                                         HiFi-GAN [1,80,T] -> waveform 16kHz (256x) -> play / save WAV
 ```
 
 ## Exact models (real URLs, verified on Hugging Face)
@@ -82,11 +82,11 @@ If `validate_models` reports `ok=false`, do not click Generate – see the error
 ## App usage
 
 1. **Reference voice**: Record (Record → Stop) or Upload WAV (any rate, automatically resampled 16 kHz). Must be >=1 s and non-silent; 3-5 s recommended.
-2. **Target text**: English, lowercased internally, 450 token limit (truncates with warning).
-3. **Generate**: Runs `generate_voice` which shows tokenizing → encoder → autoregressive decoder (with past KV) → vocoder. Reuses the 512-dim speaker embedding if reference unchanged.
+2. **Target text**: English, case-preserved, SentencePiece-char tokenized (▁ metaspace, 81 vocab verified), 450 token limit (truncates with warning, EOS preserved, no BOS).
+3. **Generate**: Runs `generate_voice` which shows tokenizing (no lowercasing) → encoder → autoregressive decoder (zero Mel start, rf=2, spectrum+prob separate heads, past KV, use_cache_branch if merged) → vocoder. Reuses the 512-dim speaker embedding if reference unchanged.
 4. **Play / Save**: Play via `sound`, Save via `audiowrite` (16 kHz WAV).
 
-`generate_voice` returns: `waveform [N,1]`, `sampleRate`, `speakerEmbedding [1,512]`, `acousticFeatures [80,T]`, `tokenIds`, `attentionMask`, `metrics` (pre/spk/tok/enc+dec/voc/total seconds), `metadata`.
+`generate_voice` returns: `waveform [N,1]`, `sampleRate`, `speakerEmbedding [1,512]`, `acousticFeatures [80,T]` (T = steps*rf), `tokenIds` (no BOS), `attentionMask`, `metrics` (pre/spk/tok/enc+dec/voc/total seconds), `metadata`.
 
 ## Tests (use MATLAB unittest assertions)
 
@@ -102,15 +102,20 @@ If `Required model assets are unavailable` is printed, the test correctly report
 
 ## Sample rate
 
-Everything is 16 kHz. `pipeline_config.fs = target_fs = hifigan_sr = 16000`. `stft_analysis` uses N=1024, hop=256 (16 ms), win=1024 (64 ms), 80 mels 80-7600 Hz, natural log. CAM++ front-end uses 25 ms/10 ms, 80 mels 20-8000 Hz, CMN. No 24 kHz exists anywhere.
+Everything is 16 kHz. `pipeline_config.fs = target_fs = hifigan_sr = 16000`. `stft_analysis` uses N=1024, hop=256 (16 ms), win=1024 (64 ms), 80 mels 80-7600 Hz, natural log, **reduction_factor=2** verified per `config.json`. CAM++ front-end uses 25 ms/10 ms, 80 mels 20-8000 Hz, CMN. No 24 kHz exists anywhere.
 
 ## Limitations (honest)
 
 - Xenova SpeechT5 ONNX is an export of the base LibriTTS checkpoint – prosody limited; long sentences may degrade after ~500 Mel frames (max_decoder_steps).
-- CAM++ generalises to unseen speakers but is not finetuned on SpeechT5 speaker space; embedding is L2-projected and genuinely conditions the decoder (checked at every step).
+- CAM++ generalises to unseen speakers but is not finetuned on SpeechT5 speaker space; embedding is L2-projected and genuinely conditions the decoder prenet every step (see `SpeechT5SpeechDecoderPrenet: speaker_embeds_layer`).
 - MATLAB `importONNXNetwork` supports opset <=17; the fp32 Xenova exports are opset 14 – compatible with R2023b+. Quantized exports (8-bit) require newer MATLAB and may not import.
+- `reduction_factor=2` means each decoder iteration emits 2 Mel frames; `max_decoder_steps=500` => up to 1000 frames (~16 s at hop256). MATLAB CPU inference ~5-20 s/sentence.
 - No training, no fine-tuning, no GPU required.
 - All inference is CPU in MATLAB Online; expect ~5-20 s per sentence depending on length.
+
+## Verification
+
+Contracts verified 2026-05-11 against `microsoft/speecht5_tts/config.json` (reduction_factor 2, vocab 81), `Xenova/speecht5_tts/tokenizer.json` (81 vocab, ▁ metaspace, BOS not prepended), and `transformers/src/transformers/models/speecht5/modeling_speecht5.py` (_generate_speech zero Mel start, spectrum+prob separate heads). Run `diagnose_onnx` on MATLAB Online to confirm ONNX graph matches; `validate_models` now distinguishes float Mel vs legacy int BOS contracts.
 
 ## Docs
 
