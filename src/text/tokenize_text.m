@@ -64,7 +64,11 @@ if ~isfield(cfg, 'max_text_len')
     cfg.max_text_len  = cfg_default.max_text_len;   % 450
     cfg.bos_token_id  = cfg_default.bos_token_id;   % 0
     cfg.eos_token_id  = cfg_default.eos_token_id;   % 2
+    cfg.unk_token_id  = cfg_default.unk_token_id;   % 3
+    cfg.vocab_size    = cfg_default.vocab_size;      % 81
 end
+% Validate vocab_size contract: surface VOCAB must not exceed declared vocab_size
+% IDs 42-80 are reserved by microsoft/speecht5_tts checkpoint (embedding rows exist but no surface char)
 
 % --- Vocabulary (0-indexed, exactly matching HF SpeechT5Tokenizer) ---
 % The token strings below are ordered so that their position index equals
