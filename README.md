@@ -45,14 +45,14 @@ models/
 
 ## MATLAB requirements (used, not invented)
 
-- MATLAB R2024a+ recommended (ONNX opset 14 support)
+- MATLAB R2023b+ minimum, R2024a+ recommended (ONNX opset 14 support; quantized opset 17 needs R2024a)
 - Audio Toolbox (audioread/write, sound, audiorecorder)
-- Signal Processing Toolbox (stft, istft, resample, hamming/hann)
-- Deep Learning Toolbox
-- **Deep Learning Toolbox Converter for ONNX Model Format** (for `importONNXNetwork`, `dlarray`, `dlnetwork`)
-- Parallel Computing Toolbox – optional (GPU not required)
+- Signal Processing Toolbox (stft, istft, resample, hann)
+- Deep Learning Toolbox (+ `dlarray`, `dlnetwork`, `predict`)
+- **Deep Learning Toolbox Converter for ONNX Model Format** (for `importONNXNetwork`) — install via Add-Ons > Get Add-Ons > “ONNX”
+- Parallel Computing Toolbox – optional (GPU not required; CPU inference ~5-20 s/sentence)
 
-Check with: `check_requirements`  – reports exactly what is missing.
+Check with: `check_requirements`  – reports missing toolboxes + MATLAB version. Also run `diagnose_onnx` to print actual ONNX InputNames/OutputNames.
 
 ## MATLAB Online – one-shot setup
 
@@ -65,6 +65,7 @@ run("scripts/setup_matlab_online.m")
 
 % 3. Validate contracts in detail
 validate_models
+diagnose_onnx   % optional: exact ONNX InputNames/OutputNames dump
 
 % 4. Launch UI
 VoiceClonerApp
