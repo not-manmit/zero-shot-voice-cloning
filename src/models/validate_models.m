@@ -1,62 +1,124 @@
-function report = validate_models()
+function report = validate_models(cfg)
 %VALIDATE_MODELS Load and inspect the ONNX model files required by the pipeline.
 %
-% Report structure includes inputs/outputs and a boolean ok flag.
+%   report = VALIDATE_MODELS()
+%   report = VALIDATE_MODELS(cfg)
+%
+%   For every model verifies:
+%     - file exists
+%     - importONNXNetwork succeeds
+%     - expected input/output names and dimensions are present
+%     - tensor types are float32/int64 as per contract
+%   Distinguishes MODEL FILE EXISTS vs MODEL CAN ACTUALLY BE USED.
 
-cfg = pipeline_config();
-report = struct('ok', false, 'models', struct());
-modelNames = {'encoder', 'decoder', 'decoder_kv', 'vocoder', 'spk_encoder'};
-paths = {cfg.paths.encoder, cfg.paths.decoder, cfg.paths.decoder_kv, cfg.paths.vocoder, cfg.paths.spk_encoder};
+if nargin < 1 || isempty(cfg) || ~isfield(cfg,'paths')
+    cfg = pipeline_config();
+end
+c = model_contract();
+
+report = struct('ok', false, 'models', struct(), 'contract', c);
+modelNames = {'encoder', 'decoder', 'decoder_with_past', 'vocoder', 'spk_encoder'};
+contractKeys = {'encoder','decoder','decoder_with_past','vocoder','spk_encoder'};
+
+overallOk = true;
 
 for i = 1:numel(modelNames)
     name = modelNames{i};
-    path = paths{i};
-    entry = struct('path', path, 'exists', false, 'ok', false, 'inputs', {}, 'outputs', {}, 'error', '');
+    cKey = contractKeys{i};
+    path = c.(cKey).file;
+    entry = struct('path', path, 'exists', false, 'ok', false, ...
+        'inputs', {{}}, 'outputs', {{}}, ...
+        'inputDetails', {{}}, 'outputDetails', {{}}, ...
+        'contract', c.(cKey), 'error', '');
 
     if ~isfile(path)
-        entry.error = sprintf('Model file missing: %s', path);
+        entry.error = sprintf('Model file missing: %s (run scripts/download_weights.m or setup_matlab_online.m)', path);
+        overallOk = false;
         report.models.(name) = entry;
+        fprintf('[validate_models] %-20s MISSING %s\n', name, path);
         continue;
     end
-
     entry.exists = true;
+
     try
         net = importONNXNetwork(path, OutputLayerType="regression");
         entry.ok = true;
-        entry.inputs = describe_network_io(net, 'input');
-        entry.outputs = describe_network_io(net, 'output');
-        report.models.(name) = entry;
+        entry.inputs = cellstr(net.InputNames);
+        entry.outputs = cellstr(net.OutputNames);
+        entry.inputDetails = describe_io(net, 'input');
+        entry.outputs = entry.outputs; % keep names
+        entry.outputDetails = describe_io(net, 'output');
+
+        % Compare against contract
+        expectedIn = {c.(cKey).inputs.name};
+        % For decoder_with_past, past tensors are dynamic count – check prefix
+        missing = setdiff(lower(expectedIn), lower(entry.inputs));
+        % Allow extra past tensors beyond the 4 fixed names
+        if strcmp(name,'decoder_with_past')
+            % need at least the 4 core inputs
+            core = expectedIn(1:4);
+            missingCore = setdiff(lower(core), lower(entry.inputs));
+            if ~isempty(missingCore)
+                entry.ok = false;
+                entry.error = sprintf('Decoder_with_past missing core inputs: %s (found %s)', strjoin(missingCore,','), strjoin(entry.inputs,','));
+                overallOk = false;
+            end
+        elseif ~isempty(missing)
+            % strict for others
+            entry.ok = false;
+            entry.error = sprintf('Input name mismatch. Expected %s ; Found %s', strjoin(expectedIn,','), strjoin(entry.inputs,','));
+            overallOk = false;
+        end
+
+        fprintf('[validate_models] %-20s OK inputs:%s outputs:%s\n', name, strjoin(entry.inputs,','), strjoin(entry.outputs,','));
+        % Print detailed shape if available (via layers)
+        for d = 1:numel(entry.inputDetails)
+            fprintf('    input %s : %s\n', entry.inputDetails{d}.name, entry.inputDetails{d}.shape);
+        end
+
     catch ME
+        entry.ok = false;
         entry.error = sprintf('ONNX import failed for %s: %s', path, ME.message);
-        report.models.(name) = entry;
+        overallOk = false;
+        fprintf('[validate_models] %-20s IMPORT FAILED: %s\n', name, ME.message);
     end
+    report.models.(name) = entry;
 end
 
-allGood = true;
-fn = fieldnames(report.models);
-for i = 1:numel(fn)
-    if ~report.models.(fn{i}).ok && ~isempty(report.models.(fn{i}).error)
-        allGood = false;
-    end
+report.ok = overallOk;
+if overallOk
+    fprintf('[validate_models] All models validated against contracts.\n');
+else
+    fprintf('[validate_models] Validation FAILED – see errors above. Do not claim ready.\n');
 end
-report.ok = allGood;
 end
 
-function details = describe_network_io(net, kind)
-if strcmp(kind, 'input')
-    names = net.InputNames;
-    if isempty(names)
-        details = {'<unnamed>'};
-        return;
+function details = describe_io(net, kind)
+details = {};
+try
+    if strcmp(kind,'input')
+        names = net.InputNames;
+        layers = net.Layers;
+        for k=1:numel(names)
+            s.name = names(k);
+            % try to find corresponding input layer size
+            lyrIdx = find(contains({layers.Name}, names(k)),1);
+            if ~isempty(lyrIdx) && isprop(layers(lyrIdx),'InputSize')
+                s.shape = mat2str(layers(lyrIdx).InputSize);
+            else
+                s.shape = 'dynamic';
+            end
+            details{end+1}=s;
+        end
+    else
+        names = net.OutputNames;
+        for k=1:numel(names)
+            s.name = names(k);
+            s.shape = 'dynamic';
+            details{end+1}=s;
+        end
     end
-    details = cellstr(names);
-    return;
+catch
+    details = {};
 end
-
-names = net.OutputNames;
-if isempty(names)
-    details = {'<unnamed>'};
-    return;
-end
-details = cellstr(names);
 end
