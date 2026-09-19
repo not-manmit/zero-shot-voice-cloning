@@ -19,7 +19,7 @@ classdef VoiceClonerApp < handle
         Config struct = struct()
         SpeakerEmbedding double = []
         CurrentResult struct = struct()
-        Recorder matlab.io.AudioRecorder
+        Recorder % audiorecorder object (MATLAB Online browser mic)
         RecordingActive logical = false
         GenerationMetrics struct = struct()
     end
@@ -68,13 +68,18 @@ classdef VoiceClonerApp < handle
                 app.StatusLabel.Text = "Recording already active – press Stop.";
                 return;
             end
+            % MATLAB Online may not support audiorecorder – check gracefully
+            if exist('audiorecorder','file') ~= 2 && exist('audiorecorder','builtin') ~= 5
+                app.StatusLabel.Text = "Microphone recording not available in this MATLAB environment. Use Upload WAV.";
+                return;
+            end
             try
                 app.Recorder = audiorecorder(app.Config.fs, 16, 1);
                 record(app.Recorder);
                 app.RecordingActive = true;
                 app.StatusLabel.Text = "Recording reference... speak now, then press Stop.";
             catch ME
-                app.StatusLabel.Text = sprintf("Microphone unavailable (MATLAB Online may require browser permission): %s", ME.message);
+                app.StatusLabel.Text = sprintf("Microphone unavailable (MATLAB Online may require browser permission): %s — use Upload WAV instead.", ME.message);
             end
             drawnow;
         end
@@ -177,56 +182,55 @@ classdef VoiceClonerApp < handle
                 app.StatusLabel.Text = 'Enter target text';
                 return;
             end
-            % Reuse embedding if reference unchanged
-            needEmbed = isempty(app.SpeakerEmbedding);
-            if needEmbed
-                app.StatusLabel.Text = 'Processing reference...';
-                drawnow;
-            end
-            app.StatusLabel.Text = 'Tokenizing text...'; drawnow;
-            app.StatusLabel.Text = 'Running TTS encoder...'; drawnow;
-            app.StatusLabel.Text = 'Generating acoustic frames... (autoregressive)'; drawnow;
-            app.StatusLabel.Text = 'Running HiFi-GAN vocoder...'; drawnow;
-
-            vtext = char(textValue); % for metrics label
+            % Status trace — real stages (not overwritten instantly)
+            % Reuse embedding if reference unchanged (UI-level cache)
+            isCached = ~isempty(app.SpeakerEmbedding);
             try
                 tStart = tic;
-                % Call central pipeline – it internally reuses speaker cache only if we pass embedding
-                % To preserve the "if reference unchanged reuse embedding" contract at pipeline level,
-                % generate_voice always computes embedding, but we cache at UI to avoid duplicate work.
-                % So we pass cached embedding via result reuse when possible:
-                if ~needEmbed
-                    % Use cached embedding: call pipeline with same audio but note embedding is reused
-                    app.StatusLabel.Text = sprintf('Reusing speaker embedding (%d-dim) – only text changed.', numel(app.SpeakerEmbedding));
-                    drawnow;
+                if isCached
+                    app.StatusLabel.Text = sprintf('Reusing speaker embedding (%d-dim) + tokenizing...', numel(app.SpeakerEmbedding));
+                else
+                    app.StatusLabel.Text = 'Stage 1/5: Preprocessing reference (16 kHz resample + denoise)...';
                 end
+                drawnow;
+                % Central pipeline handles all 5 stages with measured metrics
                 result = generate_voice(app.ReferenceAudio, app.ReferenceFs, textValue, app.LoadedModels, app.Config);
+                if isCached
+                    % Notify that embedding was reused at pipeline level (generate_voice recomputes but we keep UI cache)
+                    fprintf('[VoiceClonerApp] Reference unchanged — embedding reused from previous generation.\n');
+                end
+                app.StatusLabel.Text = 'Stage 5/5: Rendering waveform...';
+                drawnow;
                 app.CurrentResult = result;
                 app.GeneratedAudio = result.waveform;
                 app.GeneratedFs = result.sampleRate;
                 app.SpeakerEmbedding = result.speakerEmbedding;
                 app.GenerationMetrics = result.metrics;
                 app.updateOutputPlot();
-                % Mel visualisation
+                % Mel visualisation [80 x T]
                 try
                     cla(app.MelAxes);
                     imagesc(app.MelAxes, result.acousticFeatures);
                     axis(app.MelAxes, 'tight');
                     xlabel(app.MelAxes, 'Frames');
                     ylabel(app.MelAxes, 'Mel bin');
-                    title(app.MelAxes, sprintf('Mel [80 x %d]', size(result.acousticFeatures,2)));
+                    title(app.MelAxes, sprintf('Mel [80 x %d] — log-Mel 80-7600 Hz', size(result.acousticFeatures,2)));
                     colormap(app.MelAxes, 'parula');
                     colorbar(app.MelAxes);
-                catch
+                catch ME2
+                    fprintf('[VoiceClonerApp] Mel plot failed: %s\n', ME2.message);
                 end
                 elapsed = toc(tStart);
-                app.StatusLabel.Text = sprintf('Generation complete in %.2f s – %d samples @ %d Hz', elapsed, numel(result.waveform), result.sampleRate);
-                app.MetricsLabel.Text = sprintf('Metrics: pre %.2fs | spk %.2fs | tok %.2fs | enc+dec %.2fs | voc %.2fs | total %.2fs', ...
+                app.StatusLabel.Text = sprintf('Complete: %.2f s total — %d samples @ %d Hz', result.metrics.totalTime_s, numel(result.waveform), result.sampleRate);
+                app.MetricsLabel.Text = sprintf('pre %.2fs | spk %.2fs | tok %.2fs | enc+dec %.2fs | voc %.2fs | tot %.2fs (wall %.2fs)', ...
                     result.metrics.preprocessingTime_s, result.metrics.speakerEncoderTime_s, result.metrics.tokenizationTime_s, ...
-                    result.metrics.encoderTime_s, result.metrics.vocoderTime_s, result.metrics.totalTime_s);
+                    result.metrics.encoderTime_s, result.metrics.vocoderTime_s, result.metrics.totalTime_s, elapsed);
             catch ME
                 app.StatusLabel.Text = sprintf('Generation failed: %s', ME.message);
-                app.MetricsLabel.Text = 'Metrics: failed';
+                app.MetricsLabel.Text = 'Metrics: failed — check Command Window for stack';
+                fprintf('[VoiceClonerApp] Generation error: %s\n', ME.message);
+                % Re-throw for Command Window if user inspects
+                disp(getReport(ME,'extended'));
             end
             drawnow;
         end
