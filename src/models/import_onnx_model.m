@@ -128,25 +128,36 @@ end
 
 isInit = true;
 if isprop(net, 'Initialized')
-    isInit = net.Initialized;
+    try
+        isInit = logical(net.Initialized);
+    catch
+        isInit = false;
+    end
+end
+if isempty(isInit) || ~isscalar(isInit)
+    isInit = isscalar(isInit) && isInit(1);
 end
 
 hasPlaceholders = false;
 if isprop(net, 'Layers')
     try
         layers = net.Layers;
-        layerClasses = arrayfun(@class, layers, 'UniformOutput', false);
-        layerNames = {layers.Name};
-        isPhClass = contains(layerClasses, 'placeholder', 'IgnoreCase', true);
-        isPhName = contains(layerNames, 'placeholder', 'IgnoreCase', true);
-        hasPlaceholders = any(isPhClass | isPhName);
+        if ~isempty(layers)
+            layerClasses = string(arrayfun(@class, layers, 'UniformOutput', false));
+            layerNames = string({layers.Name});
+            isPhClass = contains(layerClasses, 'placeholder', 'IgnoreCase', true);
+            isPhName = contains(layerNames, 'placeholder', 'IgnoreCase', true);
+            hasPlaceholders = any(isPhClass) || any(isPhName);
+        end
     catch
     end
 end
 
+hasPlaceholders = isscalar(hasPlaceholders) && logical(hasPlaceholders);
 meta.hasPlaceholderLayers = hasPlaceholders;
+
 % Do not classify a partially imported uninitialized or placeholder-bearing network
 % as fully inference-ready
-meta.isInitialized = isInit && ~hasPlaceholders;
+meta.isInitialized = isscalar(isInit) && logical(isInit) && ~hasPlaceholders;
 
 end

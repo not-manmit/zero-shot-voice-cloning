@@ -72,10 +72,10 @@ cfg.paths.tokenizer_vocab = fullfile(model_root, 'speecht5', 'tokenizer_vocab.js
 %  - xvector_encoder.onnx: feats [1, T, 80] format UUU -> embsOutput [1, 512]
 cfg.onnx = struct();
 cfg.onnx.encoder_inputs = {'input_ids'};
-cfg.onnx.encoder_outputs = {'last_hidden_state'};
-cfg.onnx.decoder_inputs = {'speaker_embeddings', 'encoder_hidden_state', 'output_sequence', 'encoder_attention_mask'};
+cfg.onnx.encoder_outputs = {'encoder_outputsOutput', 'encoder_attention_maOutput', 'last_hidden_state'};
+cfg.onnx.decoder_inputs = {'speaker_embeddings', 'encoder_hidden_state', 'output_sequence', 'encoder_attention_ma'};
 cfg.onnx.decoder_outputs = {'spectrumOutput', 'probOutput'};
-cfg.onnx.decoder_with_past_inputs = {'speaker_embeddings', 'output_sequence', 'encoder_attention_mask'}; % plus 24 past KV
+cfg.onnx.decoder_with_past_inputs = {'speaker_embeddings', 'output_sequence', 'encoder_attention_ma'}; % plus 24 past KV
 cfg.onnx.decoder_with_past_outputs = {'spectrumOutput', 'probOutput'};
 cfg.onnx.vocoder_inputs = {'spectrogram'};
 cfg.onnx.vocoder_outputs = {'waveformOutput'};

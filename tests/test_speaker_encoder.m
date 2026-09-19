@@ -80,7 +80,8 @@ try
         sprintf("Embedding is not L2-normalized (norm = %.6f, expected 1.0)", emb_norm));
     fprintf("[test_speaker_encoder] Speaker encoder forward inference PASSED.\n");
 catch ME
-    if spkMeta.hasPlaceholderLayers || contains(ME.message, "placeholder", "IgnoreCase", true) || ...
+    hasPh = isfield(spkMeta, 'hasPlaceholderLayers') && any(spkMeta.hasPlaceholderLayers);
+    if hasPh || contains(ME.message, "placeholder", "IgnoreCase", true) || ...
        contains(ME.message, "AveragePool", "IgnoreCase", true) || contains(ME.message, "ceil_mode", "IgnoreCase", true)
         inference_blocked = true;
         fprintf("\n  [KNOWN BLOCKER CONFIRMED - DO NOT FABRICATE SUCCESS]:\n");

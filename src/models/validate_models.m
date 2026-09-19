@@ -117,22 +117,26 @@ for i = 1:numel(modelKeys)
         case 'encoder'
             % Verified contract: ONLY input_ids [1, T] format UU. No attention_mask.
             hasInputIds = any(contains(lowerIn, "input_ids"));
-            hasHidden = any(contains(lowerOut, "hidden"));
+            hasHidden = any(contains(lowerOut, "hidden")) || ...
+                        any(contains(lowerOut, "encoder_outputs")) || ...
+                        any(contains(lowerOut, "last_hidden_state"));
 
             if ~hasInputIds
                 hasFailure = true;
                 entry.message = sprintf("Encoder missing input_ids. Observed: [%s]", strjoin(entry.inputs, ", "));
             elseif ~hasHidden
                 hasWarning = true;
-                entry.message = sprintf("Encoder output name '%s' differs from 'last_hidden_state'.", strjoin(entry.outputs, ", "));
+                entry.message = sprintf("Encoder output name '%s' differs from 'encoder_outputs' / 'last_hidden_state'.", strjoin(entry.outputs, ", "));
             end
 
         case 'decoder'
-            % Verified contract: speaker_embeddings, encoder_hidden_state, output_sequence, encoder_attention_mask
+            % Verified contract: speaker_embeddings, encoder_hidden_state, output_sequence, encoder_attention_mask (or encoder_attention_ma)
             hasSpk = any(contains(lowerIn, "speaker"));
             hasHidden = any(contains(lowerIn, "hidden"));
             hasSeq = any(contains(lowerIn, "output_sequence"));
-            hasMask = any(contains(lowerIn, "mask"));
+            hasMask = any(contains(lowerIn, "mask")) || ...
+                      any(contains(lowerIn, "attention")) || ...
+                      any(contains(lowerIn, "attention_ma"));
             hasSpectrum = any(contains(lowerOut, "spectrum")) || any(contains(lowerOut, "feat"));
             hasProb = any(contains(lowerOut, "prob")) || any(contains(lowerOut, "logit"));
 
@@ -185,10 +189,26 @@ for i = 1:numel(modelKeys)
                 entry.message = sprintf("Speaker encoder output name [%s] differs from 'embsOutput'.", strjoin(entry.outputs, ", "));
             end
 
-            % Check for placeholder layers in CAM++
-            if meta.hasPlaceholderLayers || ~meta.isInitialized
+            % Check for placeholder layers in CAM++ (guarantee scalar logicals)
+            hasPh = isfield(meta, 'hasPlaceholderLayers') && ...
+                    ~isempty(meta.hasPlaceholderLayers) && ...
+                    any(meta.hasPlaceholderLayers);
+            isInit = isfield(meta, 'isInitialized') && ...
+                     ~isempty(meta.isInitialized) && ...
+                     all(meta.isInitialized);
+
+            entry.hasPlaceholderLayers = hasPh;
+            entry.isInitialized = isInit;
+
+            if hasPh || ~isInit
                 hasWarning = true;
-                entry.message = "CAM++ contains unsupported AveragePool (ceil_mode) and BatchNormalization (training_mode) placeholder layers.";
+                if hasPh && ~isInit
+                    entry.message = "CAM++ contains unsupported placeholder layers (AveragePool ceil_mode, BatchNormalization training_mode) and network is uninitialized.";
+                elseif hasPh
+                    entry.message = "CAM++ contains unsupported AveragePool (ceil_mode) placeholder layers.";
+                else
+                    entry.message = "CAM++ network is uninitialized.";
+                end
             end
     end
 

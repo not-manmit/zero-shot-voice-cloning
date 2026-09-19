@@ -57,10 +57,25 @@ classdef tensor_contract_utils
             end
         end
 
-        function hidden_states = parse_encoder_outputs(raw_out, ~)
-            %PARSE_ENCODER_OUTPUTS Extract last_hidden_state [1, T, 768]
+        function hidden_states = parse_encoder_outputs(raw_out, net)
+            %PARSE_ENCODER_OUTPUTS Extract last_hidden_state / encoder_outputs [1, T, 768]
             if iscell(raw_out)
-                raw = extractdata(raw_out{1});
+                raw = [];
+                if nargin >= 2 && ~isempty(net) && isprop(net, 'OutputNames')
+                    outNames = cellstr(net.OutputNames);
+                    for k = 1:numel(raw_out)
+                        if k <= numel(outNames)
+                            nm = lower(strtrim(outNames{k}));
+                            if contains(nm, "encoder_outputs") || contains(nm, "hidden")
+                                raw = extractdata(raw_out{k});
+                                break;
+                            end
+                        end
+                    end
+                end
+                if isempty(raw)
+                    raw = extractdata(raw_out{1});
+                end
             else
                 raw = extractdata(raw_out);
             end
@@ -99,7 +114,7 @@ classdef tensor_contract_utils
                     spk_row = single(reshape(spk_vec, 1, 512));
                     formatted_inputs{i} = dlarray(spk_row, 'UU');
 
-                elseif contains(nm_lower, "encoder_hidden") || (contains(nm_lower, "hidden") && ~contains(nm_lower, "mask"))
+                elseif contains(nm_lower, "encoder_hidden") || (contains(nm_lower, "hidden") && ~contains(nm_lower, "attention") && ~contains(nm_lower, "mask"))
                     % encoder_hidden_state: [1, T, 768] format 'UUU'
                     enc_h = single(enc_hidden);
                     if ndims(enc_h) == 2
@@ -117,8 +132,8 @@ classdef tensor_contract_utils
                     end
                     formatted_inputs{i} = dlarray(out_seq, 'UUU');
 
-                elseif contains(nm_lower, "mask")
-                    % encoder_attention_mask: [1, T] format 'UU'
+                elseif contains(nm_lower, "mask") || contains(nm_lower, "attention") || contains(nm_lower, "attn")
+                    % encoder_attention_mask / encoder_attention_ma: [1, T] format 'UU'
                     mask_row = int64(reshape(enc_mask, 1, []));
                     formatted_inputs{i} = dlarray(mask_row, 'UU');
 
