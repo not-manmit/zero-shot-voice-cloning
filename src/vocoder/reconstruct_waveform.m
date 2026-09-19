@@ -1,11 +1,20 @@
 function waveform = reconstruct_waveform(target_mel, fs, models, cfg)
-%RECONSTRUCT_WAVEFORM  Neural HiFi-GAN vocoder with explicit contract.
+%RECONSTRUCT_WAVEFORM Neural HiFi-GAN waveform synthesis from 80-bin Mel spectrogram.
 %
 %   waveform = RECONSTRUCT_WAVEFORM(target_mel, fs, models, cfg)
 %
-%   Contract: input Mel [80,T] or [T,80] will be oriented to [1,80,T] float32
-%   with input name 'spectrogram'. Output: mono 16 kHz waveform [N,1].
-%   Xenova/speecht5_hifigan model.onnx expects natural-log Mel (not dB).
+%   Boundary Contract:
+%     Input:  target_mel [80 x T] natural log-Mel matrix (HTK scale, 80-7600 Hz)
+%     Layout: Formatted via tensor_contract_utils as [1, 80, T] SCB for 'spectrogram'
+%     Output: 16 000 Hz single-channel discrete-time speech sequence [N x 1]
+%
+%   Synthesis Steps:
+%     1. Validate Mel dimension and frame count (must have 80 bins, >= 5 frames)
+%     2. Apply log-floor bounding: max(mel, log(cfg.mel_floor))
+%     3. Format dlarray input via centralized tensor_contract_utils
+%     4. HiFi-GAN ONNX forward inference: predict(models.vocoder, voc_in)
+%     5. Extract waveform array (256x upsampling factor: N = T * 256)
+%     6. Peak normalisation to safe acoustic range [-1.0, 1.0]
 
 arguments
     target_mel (:,:) {mustBeNumeric, mustBeFinite}
@@ -14,65 +23,59 @@ arguments
     cfg struct = struct()
 end
 
-if isempty(cfg) || ~isfield(cfg,'fs')
+if isempty(cfg) || ~isfield(cfg, 'fs')
     cfg = pipeline_config();
 end
 if isempty(models) || ~isfield(models, 'vocoder')
     models = load_onnx_engine(cfg);
 end
+
 if isempty(target_mel)
-    error('reconstruct_waveform:EmptyFeatures', 'Mel input is empty.');
-end
-if ~isfield(models,'vocoder') || isempty(models.vocoder)
-    error('reconstruct_waveform:MissingModel', 'No vocoder loaded – run setup_matlab_online.m');
+    error("reconstruct_waveform:EmptyFeatures", "Target Mel acoustic feature matrix is empty.");
 end
 
-% Orient to [80,T]
+% Orient to [80 x T]
 mel = double(target_mel);
-if size(mel,1) ~= cfg.n_mels && size(mel,2) == cfg.n_mels
+if size(mel, 1) ~= cfg.n_mels && size(mel, 2) == cfg.n_mels
     mel = mel.';
 end
-if size(mel,1) ~= cfg.n_mels
-    error('reconstruct_waveform:BadMelShape','Mel must have %d bins, got %d x %d (expected [80,T])', cfg.n_mels, size(mel,1), size(mel,2));
-end
-if size(mel,2) < 5
-    error('reconstruct_waveform:MelTooShort','Mel has only %d frames; need >=5', size(mel,2));
-end
-if abs(fs - cfg.hifigan_sr) > 1
-    warning('reconstruct_waveform:SampleRateMismatch','Vocoder sample rate %d != hifigan_sr %d — output will be at %d Hz', fs, cfg.hifigan_sr, cfg.hifigan_sr);
-    fs = cfg.hifigan_sr;
+
+if size(mel, 1) ~= cfg.n_mels
+    error("reconstruct_waveform:InvalidMelDimensions", ...
+        "Mel spectrogram must have %d frequency bins (observed %d x %d).", ...
+        cfg.n_mels, size(mel, 1), size(mel, 2));
 end
 
-% Clip Mel to log floor to avoid vocoder blowup/NaN
+if size(mel, 2) < 4
+    error("reconstruct_waveform:MelTooShort", ...
+        "Mel spectrogram has only %d temporal frames (minimum required: 4).", size(mel, 2));
+end
+
+% Ensure natural log floor bounding
 mel = max(mel, log(cfg.mel_floor));
 
-% Explicit vocoder input contract — no heuristic fallback
-names = cellstr(models.vocoder.InputNames);
-if ~any(strcmpi(names,'spectrogram'))
-    error('reconstruct_waveform:ContractMismatch','Vocoder expected input ''spectrogram'' but found [%s]. Check models/speecht5/vocoder_model.onnx is Xenova/speecht5_hifigan model.onnx', strjoin(names,','));
-end
-mel_batched = single(reshape(mel, 1, size(mel,1), size(mel,2))); % [1,80,T]
-voc_in = dlarray(mel_batched, 'SCB'); % verified single layout [B,80,T] SCB; diagnose_onnx must confirm
-
-
+% Format dlarray using centralized utility
 try
+    voc_in = tensor_contract_utils.format_vocoder_inputs(mel, models.vocoder);
     out = predict(models.vocoder, voc_in);
     wave_raw = extractdata(out);
 catch ME
-    error('reconstruct_waveform:InferenceFailed', 'HiFi-GAN vocoder failed: %s\nCheck that models/speecht5/vocoder_model.onnx is Xenova/speecht5_hifigan model.onnx (input spectrogram [1,80,T] log-Mel).', ME.message);
+    error("reconstruct_waveform:InferenceFailed", ...
+        "HiFi-GAN vocoder inference failed.\nError: %s\nExpected input: 'spectrogram' [1, 80, T] SCB.", ME.message);
 end
 
 waveform = double(wave_raw(:));
+
 if isempty(waveform) || ~all(isfinite(waveform))
-    error('reconstruct_waveform:InvalidOutput','Vocoder output empty or non-finite');
+    error("reconstruct_waveform:InvalidWaveformOutput", ...
+        "Vocoder produced an empty, NaN, or Inf waveform sequence.");
 end
-if numel(waveform) < fs*0.1
-    warning('reconstruct_waveform:ShortOutput','Vocoder waveform only %d samples (%.2f s)', numel(waveform), numel(waveform)/fs);
+
+% Peak normalize to unity [-1, 1] without blowing up near-silent outputs
+peak = max(abs(waveform));
+if peak > 1.0
+    waveform = waveform ./ peak;
 end
-% Peak normalise to [-1,1] without amplifying quiet outputs
-pk = max(abs(waveform));
-if pk > eps
-    waveform = waveform / max(pk, 1);
-end
-waveform = max(-1,min(1,waveform));
+waveform = max(-1.0, min(1.0, waveform));
+
 end

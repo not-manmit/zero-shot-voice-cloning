@@ -46,6 +46,7 @@ ENV/
 *.flac
 *.m4a
 !**/notebooks/**/*.ipynb
+/models/
 checkpoints/
 models_cache/
 outputs/

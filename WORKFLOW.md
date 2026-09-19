@@ -1,63 +1,62 @@
 # Developer Workflow & Execution Rules  
-## Zero-Shot Voice Cloning System (MATLAB Edition)
+## Zero-Shot Voice Cloning System (MATLAB Online Edition)
 
-## The “Local-to-Cloud” Constraint
+---
 
-The developer’s local machine **lacks the resources** to run this project.  
-The AI coding agent must strictly adhere to this workflow:
+## 1. The "Local-to-Cloud" Architecture
 
-1. **Write Local**  
-   - Generate and edit `.m` and `.mlapp` files in the local VS Code workspace.
-2. **Git Push**  
-   - Push text-based code to GitHub.
-3. **Cloud Execution**  
-   - The developer will:
-     - Pull the code in **MATLAB Online**  
-     - Run and test everything there.
+The local development environment lacks the memory and compute resources to execute deep learning models in MATLAB. Therefore, all development follows this strict separation of concerns:
 
-## AI Agent Rules for Testing
+```text
+[LOCAL MACHINE / VS CODE]
+  ├── Code authoring and editing (.m, .md)
+  ├── Static consistency checks & syntax verification
+  ├── Git version control & clean commits
+  └── PUSH TO GITHUB
+            │
+            ▼
+[MATLAB ONLINE / MATLAB DRIVE]
+  ├── PULL REPOSITORY
+  ├── run("scripts/setup_matlab_online.m")     <- downloads ~875 MB ONNX models via websave
+  ├── run("scripts/validate_matlab_online.m")  <- preflight validation of all toolboxes & models
+  ├── run("tests/test_end_to_end.m")           <- synthetic pipeline integrity test
+  ├── run("tests/test_end_to_end_real_reference.m") <- real human voice cloning validation
+  └── VoiceClonerApp                           <- interactive synthesis UI
+```
 
-- **DO NOT** attempt to run MATLAB scripts locally using terminal commands (e.g., `matlab -batch`).  
-- **DO NOT** write shell scripts for local testing.  
-- Assume all testing happens **asynchronously** by the human developer in MATLAB Online.  
+---
 
-## Data & Git Management
+## 2. Strict Execution Rules for AI Coding Agents
 
-### Storage Constraints
+- **DO NOT** attempt to run MATLAB locally (`matlab -batch`, `matlab -r`, `matlab -nodisplay`).
+- **DO NOT** write bash or PowerShell scripts designed to execute MATLAB locally.
+- **DO NOT** claim MATLAB execution has passed unless executed by the human developer in MATLAB Online.
+- **NO PYTHON** at runtime: no PyTorch, no FastAPI, no Docker, no ONNX Runtime Python wrappers.
 
-- **MATLAB Drive:** 20 GB limit  
-- **GitHub:** File size limits (avoid large binaries)  
+---
 
-### Strict `.gitignore` Rules
+## 3. Data & Storage Hygiene
 
-Exclude the following from version control:
+- **MATLAB Drive Quota:** 20 GB standard limit. The 5 canonical ONNX models total ~875.7 MB, easily fitting within storage limits.
+- **Git Binary Exclusion:** Model binaries (`*.onnx`, `*.pt`, `*.bin`) and audio waveforms (`*.wav`, `*.mp3`, `*.flac`) are excluded from Git via `.gitignore`.
+- Models are downloaded directly inside MATLAB Online using native `websave` in `scripts/download_weights.m`.
 
-- All audio files:
-  - `*.wav`, `*.mp3`, `*.flac`, `*.ogg`, etc.
-- All deep learning weights and model files:
-  - `*.onnx`, `*.pt`, `*.bin`, `*.pth`, `*.safetensors`, etc.
-- MATLAB binary / auto-save files:
-  - `*.mat`, `*.asv`, `*.fig`, `*.mlx`, `*.mlappinstall`, etc.
-- Temporary / cache files:
-  - `*.log`, `*.tmp`, `__pycache__` (if ever mixed), etc.
+---
 
-### Model Handling
+## 4. Master MATLAB Online Testing Sequence
 
-- Do **not** version-control large model files.  
-- Implement a utility script:
+When testing in MATLAB Online, the developer executes:
 
-  - `scripts/download_weights.m`  
-    - Uses `websave` (or similar) to download heavy ONNX files **directly** to the MATLAB Drive runtime environment.  
-    - Documents expected URLs / sources and target paths within the repo structure.  
+```matlab
+% 1. Setup paths and download missing ONNX models
+run("scripts/setup_matlab_online.m")
 
-All such downloads must be performed by the developer inside MATLAB Online, not by the AI agent locally.
+% 2. Master preflight validator (checks dependencies, imports, and runs all smoke tests)
+run("scripts/validate_matlab_online.m")
 
-## Git Commit Conventions (Recommended)
+% 3. Optional real speech validation (place clean 3-5 s WAV at tests/reference_speech.wav)
+run("tests/test_end_to_end_real_reference.m")
 
-Use clear, conventional commit messages, e.g.:
-
-- `feat: add preprocess_signal.m with resampling and noise reduction`  
-- `fix: correct STFT windowing in stft_analysis.m`  
-- `docs: update PRD with UI playback requirements`  
-
-This keeps the history readable for academic evaluation and future collaborators.
+% 4. Launch interactive Voice Cloning App
+VoiceClonerApp
+```

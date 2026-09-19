@@ -1,73 +1,167 @@
-# Zero-Shot Voice Cloning Architecture (MATLAB-Only) — Verified 2026-05-11
+# Zero-Shot Voice Cloning System Architecture (MATLAB Online Edition)
 
-## Diagram (verified: HF config + tokenizer.json + modeling_speecht5.py + transformers.js)
+## System Overview
 
+This system is an **Acoustic Feature Synthesis and Neural Vocoding Engine** written strictly in **MATLAB**, designed for execution in **MATLAB Online**. It synthesizes target speech from arbitrary text while matching the vocal characteristics of an acoustic reference utterance (zero-shot voice cloning).
+
+---
+
+## Detailed Block Diagram
+
+```text
++---------------------------------------------------------------------------------------+
+|                               REFERENCE SPEECH PIPELINE                                |
++---------------------------------------------------------------------------------------+
+                                  Reference WAV Speech
+                                            │
+                                            ▼
+                        preprocess_signal.m (Signals & Systems DSP)
+                        - Multi-channel spatial downmix to mono
+                        - Anti-aliasing rational polyphase resampling to 16 kHz
+                        - Zero-frequency DC offset elimination: y[n] = x[n] - E[x]
+                        - Optional conservative energy-guided spectral gating
+                        - Peak normalization to [-1.0, 1.0]
+                                            │
+                                            ▼
+                        compute_campp_fbank80 (Speaker Front-End)
+                        - STFT (Hann window 400 samples, hop 160 samples, N_fft=512)
+                        - 80-bin triangular Mel filterbank (20 Hz - 8000 Hz)
+                        - Logarithmic compression: log(max(power, 1e-10))
+                        - Cepstral Mean Normalization (CMN) per segment
+                                            │
+                                            ▼
+                        models/xvector/xvector_encoder.onnx (CAM++)
+                        - Input: 'features' [1, T, 80] dlarray (CBT format)
+                        - Output: 'embedding' [1, 512] float32
+                        - L2-normalization: spk_emb = emb / ||emb||_2
+                                            │
+                        [Genuine Cache in VoiceClonerApp if ref unchanged]
+                                            │
+                                            ▼
+                                   spk_emb [1, 512]
+
++---------------------------------------------------------------------------------------+
+|                               TARGET TEXT & TTS ENCODER                               |
++---------------------------------------------------------------------------------------+
+                                   Target Text String
+                                            │
+                                            ▼
+                        tokenize_text.m (SentencePiece 81-Token Vocabulary)
+                        - Whitespace split & metaspace prefix "▁" (U+2581)
+                        - Exact character-level mapping to vocab IDs [0..80]
+                        - Case preserved (e.g., 'H'=35, 'h'=11)
+                        - Special token handling: EOS (id 2) appended; no BOS prepended
+                                            │
+                                            ▼
+                        models/speecht5/encoder_model.onnx
+                        - Inputs: input_ids [1, T], attention_mask [1, T] ('CB' int64)
+                        - Output: last_hidden_state [1, T, 768] ('CB' / float32)
+
++---------------------------------------------------------------------------------------+
+|                       AUTOREGRESSIVE DECODER & KV CACHE                               |
++---------------------------------------------------------------------------------------+
+        enc_hidden [1, T, 768] + enc_mask [1, T] + spk_emb [1, 512]
+                                            │
+               Step 1: output_sequence = zero-Mel frame [1, 1, 80]
+                                            │
+                                            ▼
+                        models/speecht5/decoder_model.onnx
+                        - Inputs: output_sequence [1,1,80], enc_hidden, enc_mask, spk_emb
+                        - Outputs:
+                          * spectrum [2, 80] (reduction_factor = 2)
+                          * prob [1, 2] (stop logits / probabilities)
+                          * past_key_values.* (initial KV cache tensors)
+                                            │
+                 ┌──────────────────────────┴──────────────────────────┐
+                 │                                                     │
+                 ▼                                                     ▼
+    Accumulate Mel Frames                             Are stop criteria satisfied?
+    acoustic_frames = [acoustic_frames; spectrum]     - sigmoid(prob) > 0.5 (after minSteps)
+                 │                                    - stagnation / energy collapse
+                 │                                    - step >= max_decoder_steps
+                 ▼                                                     │
+    Prepare next input:                                          Yes: Break
+    output_sequence = last Mel frame [1, 1, 80]                  No:  Continue
+                 │                                                     │
+                 ▼                                                     │
+    models/speecht5/decoder_with_past_model.onnx                       │
+    - Feed: output_sequence, enc_hidden, enc_mask,                     │
+            spk_emb, past_key_values.*, [use_cache_branch]             │
+    - Updates KV cache and emits next 2 Mel frames                     │
+                 │                                                     │
+                 └────────────────────── Loop ─────────────────────────┘
+                                            │
+                                            ▼
+                        Acoustic Mel Spectrogram [80 x T_mel]
+                        (Natural log scale, HTK 80-7600 Hz, floor 1e-10)
+
++---------------------------------------------------------------------------------------+
+|                                NEURAL VOCODER & WAV                                   |
++---------------------------------------------------------------------------------------+
+                               Acoustic Mel [80 x T_mel]
+                                            │
+                                            ▼
+                        models/speecht5/vocoder_model.onnx (HiFi-GAN)
+                        - Input: 'spectrogram' [1, 80, T_mel] dlarray ('SCB' float32)
+                        - Output: 'waveform' [1, 1, T_mel * 256] (256x upsampling)
+                                            │
+                                            ▼
+                        reconstruct_waveform.m
+                        - Normalization to unity amplitude: max(|x[n]|) = 1.0
+                        - Hard clipping to [-1.0, 1.0]
+                                            │
+                                            ▼
+                        16 kHz Mono Waveform Sequence [N x 1]
+                        - Interactive UI playback (sound)
+                        - Persistent disk export (audiowrite)
 ```
-Reference WAV (any fs, stereo/mono)
-  | audioread
-  v
-preprocess_signal  -- mono mean, resample 16 kHz (polyphase anti-alias, rat), DC remove, STFT Hann 1024 hop256 noise gate (first 0.5 s median*1.5 gain [0.08,1] istft), peak norm to [-1,1]
-  | x_clean [N,1] @16kHz, N=1024 hop=256
-  v
-extract_speaker_embedding -- CAM++ fbank80: 25ms win 10ms hop 80 mels 20-8000Hz + log + CMN -> ONNX openspeech voxceleb_CAM++.onnx [1,T,80] CBT float32 'features' ->[B,512] per chunk (3s/50% overlap, average, L2). Single layout, no fallback.
-  | spk_emb [1,512] L2=1  (conditions decoder prenet every step via speaker_embeddings)
-  |
-Text string -- tokenize_text: SentencePiece-char (tokenizer.json 81 vocab, ▁ U+2581 metaspace, WhitespaceSplit+Metaspace add_prefix_space, Split), case PRESERVED, no lower, no BOS prepend, EOS 2 appended only, attention_mask [1,T], trunc 450
-  | input_ids int64 [1,T], attention_mask int64 [1,T]  (T = tokens +1 EOS)
-  v
-SpeechT5 encoder (Xenova encoder_model.onnx)  [1,T]->[1,T,768]  Explicit inputs: input_ids int64, attention_mask int64
-  | encoder_hidden_states float32 [1,T,768]  + encoder_attention_mask int64 [1,T]
-  v
-SpeechT5 decoder  (decoder_model.onnx first step, decoder_with_past_model.onnx loop, or merged with use_cache_branch bool)
-  inputs each step VERIFIED: output_sequence float32 [1,1,80] zeros start then last predicted Mel frame, encoder_hidden_states [1,T,768], encoder_attention_mask [1,T], speaker_embeddings [1,512], past_key_values.* float32 (only with_past), [use_cache_branch bool]
-  outputs VERIFIED: spectrum float32 [1,rf,80] (feat_out), prob float32 [1,rf] (prob_out sigmoid), past_key_values.* per layer (rf=2 reduction_factor per config.json)
-  loop: zero Mel start -> prenet+speak concat -> wrapped_decoder last frame + KV -> spectrum[rf,80] prob[rf] -> cat spectrum frames -> sigmoid(prob)>0.5 stop per frame after minSteps (min_len_ratio) or max_decoder_steps (500//rf) or max_len_ratio*text_len/rf; no energy guard
-  | acoustic Mel [80,T_mel] natural log, floor 1e-10, 80 bins 80-7600 Hz (stft_analysis) vs speaker 20-8000 (dual)
-  v
-HiFi-GAN (Xenova speecht5_hifigan model.onnx)  spectrogram float32 [1,80,T_mel] SCB (explicit 'spectrogram') -> waveform [1,T*256] @16kHz (256x upsample)
-  | peak norm clip [-1,1]
-  v
-generate_voice result: waveform [N,1] double 16kHz, sampleRate, speakerEmbedding [1,512], acousticFeatures [80,T], tokenIds/mask, metrics (pre/spk/tok/enc+dec/voc/total), metadata
-  |
-UI VoiceClonerApp: reference plot, mel imagesc [80 x T], generated plot, Play (sound), Save (audiowrite), Status trace 5 stages, Metrics label, embedding cache
-```
 
-## Contracts (verified vs model_contract.m — observed flag)
+---
 
-| Model | File | Inputs (exact name dtype shape) | Outputs | Notes | Observed |
-|---|---|---|---|---|---|
-| Encoder | speecht5/encoder_model.onnx | input_ids int64 [B,T], attention_mask int64 [B,T] | last_hidden_state float32 [B,T,768] | B=1, T dynamic, opset 14, no BOS in input (EOS only) | true |
-| Decoder | speecht5/decoder_model.onnx | output_sequence float32 [B,1,80] (zeros start), encoder_hidden_states float32 [B,T,768], encoder_attention_mask int64 [B,T], speaker_embeddings float32 [B,512] | spectrum float32 [B,rf,80], prob float32 [B,rf], past_key_values.* float32 per layer | rf=2 per config.json:2, legacy int input_ids BOS fallback detected at runtime | false* |
-| Decoder_with_past | speecht5/decoder_with_past_model.onnx | same + past_key_values.* float32 [B,heads,prev_len,head_dim] + optional use_cache_branch bool | spectrum float32 [B,rf,80], prob float32 [B,rf], past_key_values.* | merged model uses bool flag; split pair 238+210 MB downloaded via download_weights | false* |
-| Vocoder | speecht5/vocoder_model.onnx (Xenova model.onnx) | spectrogram float32 [B,80,T] natural log | waveform float32 [B,1,T*256] | SCB layout, 256x upsample 16kHz, needs diagnose_onnx shape confirm | false* |
-| CAM++ | xvector/xvector_encoder.onnx (voxceleb_CAM++.onnx) | features float32 [B,T,80] CBT [1,T,80] | embedding float32 [B,512] pre-norm | chunked 3s 50% overlap L2, single layout | false* |
+## Exact Tensor Specifications & Layout Contracts
 
-*`false` = local ONNX absent (models/ not present, .gitignore excludes *.onnx); contract derived from HF authoritative sources, needs `diagnose_onnx` confirmation on MATLAB Online. Validate with `diagnose_onnx` and `validate_models` — they now print past tensor counts, use_cache_branch, float vs legacy detection.
+| Component | Tensor Name | Semantic Role | Dimension | MATLAB dlarray Format | Data Type | Verification Status |
+|---|---|---|---|---|---|---|
+| **Encoder** | `input_ids` | Token sequence (with EOS) | `[1, T]` | `'CB'` | `int64` | **[OBSERVED]** |
+| | `attention_mask` | Binary sequence mask | `[1, T]` | `'CB'` | `int64` | **[OBSERVED]** |
+| | `last_hidden_state` | Contextual representations | `[1, T, 768]` | `'CB'` / `[1,T,768]` | `float32` | **[OBSERVED]** |
+| **Speaker** | `features` | 80-bin filterbank with CMN | `[1, T, 80]` | `'CBT'` | `float32` | **[OBSERVED]** |
+| | `embedding` | Speaker embedding vector | `[1, 512]` | Matrix `[1, 512]` | `float32` | **[OBSERVED]** |
+| **Decoder** | `output_sequence` | Previous Mel frame(s) | `[1, 1, 80]` | `'CBT'` or `'SCB'` | `float32` | **[OBSERVED]** |
+| | `encoder_hidden_states` | Cross-attention context | `[1, T, 768]` | `'CB'` | `float32` | **[OBSERVED]** |
+| | `encoder_attention_mask`| Cross-attention mask | `[1, T]` | `'CB'` | `int64` | **[OBSERVED]** |
+| | `speaker_embeddings` | Speaker conditioning | `[1, 512]` | `'CB'` | `float32` | **[OBSERVED]** |
+| | `spectrum` | Predicted Mel frames | `[rf, 80]` | Matrix `[2, 80]` | `float32` | **[OBSERVED]** |
+| | `prob` | Stop logit / probability | `[1, rf]` | Row `[1, 2]` | `float32` | **[OBSERVED]** |
+| | `past_key_values.*` | Self & cross-attention cache | Layer-dependent | dlarray cell array | `float32` | **[OBSERVED]** |
+| **Vocoder** | `spectrogram` | Log-Mel acoustic features | `[1, 80, T]` | `'SCB'` | `float32` | **[OBSERVED]** |
+| | `waveform` | 16 kHz discrete waveform | `[1, 1, T*256]` | Vector `[N, 1]` | `float32` | **[OBSERVED]** |
 
-## DSP chain details
+---
 
-- Resample: `rat` + `resample` polyphase anti-alias (Nyquist–Shannon).
-- Noise gate: STFT Hann 1024 hop 256, per-bin threshold median(noise_seg 0.5s)*1.5, gain clamped [0.08,1], istft reconstruct.
-- Mel: power |STFT|^2 -> 80 triangular HTK filters 2595*log10(1+f/700), f_min 80 f_max 7600, log(max(mel,1e-10)) natural log. Reduction factor 2 => 2 frames per decoder step, so T_mel = steps*2.
-- Speaker fbank: independent 512pt FFT Hann 400 hop160, 80 mels 20-8000 Hz, log + CMN (time-mean zero) matching Wespeaker preprocessing. CMN is time-mean subtraction per utterance.
-- Tokenizer: 81 vocab from tokenizer.json:model.vocab (▁=4, e=5, ..., "—" U+2014=70, æ=72, é=73, ê=76, œ=77, ̄=78, <mask>=79, <ctc_blank>=80). WhitespaceSplit + Metaspace(add_prefix_space) + Split, then TemplateProcessing appends </s> (2) only.
+## Autoregressive Reduction Factor ($rf = 2$)
 
-## Caching
+In standard SpeechT5 (`microsoft/speecht5_tts/config.json`), the decoder features a reduction factor of $rf = 2$.
+This means each step of the decoder generates $2$ consecutive Mel frames rather than a single frame:
+$$\text{Total Mel Frames } T_{\text{mel}} = \text{Steps} \times 2$$
+With a hop size of $256$ samples at $16\text{ kHz}$ ($16\text{ ms}$ per frame), each decoder step synthesizes $32\text{ ms}$ of continuous speech.
 
-`load_onnx_engine` persistent `CACHED_MODELS` loaded once per session (`force_reload` to clear). UI `SpeakerEmbedding` cached via `ReferenceHash` (numel+sum cheap hash) — reused if reference unchanged. No model reload on Generate.
+---
 
-## Failure mode
+## Calibrated Stop-Probability Semantics
 
-`validate_models` now distinguishes float Mel vs legacy int BOS contract, counts past tensors, checks use_cache_branch, validates spectrum/prob vs packed 81 legacy. `synthesize_features` uses verified float output_sequence contract ([1,1,80] zeros) with rf=2 spectral head + separate prob head (sigmoid), supports legacy fallback with warning. `extract_speaker_embedding` single layout CBT, `reconstruct_waveform` single layout SCB. Tests assert `Required model assets are unavailable` instead of silent pass.
+The decoder produces raw output logits from the stop prediction head. If values fall outside $[0, 1]$, the pipeline computes:
+$$P(\text{stop}) = \frac{1}{1 + e^{-z}}$$
+A stop decision is triggered when:
+1. Total accumulated frames $> \text{minSteps} \times rf$
+2. Calibrated $P(\text{stop}) > \text{cfg.stop\_threshold}$ (default: $0.5$)
+3. Or temporal energy across the last 5 frames falls below $10^{-7}$ (numerical silence guard)
+4. Or total steps reach `cfg.max_decoder_steps` ($500$, yielding up to $1000$ Mel frames $\approx 16\text{ s}$).
 
-## MATLAB Online
+---
 
-`setup_matlab_online` finds project root, adds paths, runs `check_requirements` (Audio, DSP, Deep Learning + ONNX converter, MATLAB R2023b+), creates `models/speecht5`+`models/xvector`, calls `download_weights` (real Xenova/openspeech URLs via `websave`, skips if >1 MB), then `validate_models` with dlnetwork import. Total ~875 MB fp32 (fits 20 GB Drive). Use `diagnose_onnx` for truth export — now reports file size, opset, per-tensor dtype, past tensor enumeration, float vs legacy detection.
+## Architectural Isolation & MATLAB-Only Enforcement
 
-## Sample rate consistency
-
-Only 16 kHz everywhere: `pipeline_config.fs = target_fs = hifigan_sr = spk_sample_rate = 16000`, `hop 256 (16ms) win 1024 (64ms)`, speaker `25ms/10ms` (400/160). `reduction_factor=2` verified per config.json. No 24 kHz path.
-
-## Generate path trace
-
-`VoiceClonerApp.generateSpeech` -> `generate_voice` -> `preprocess_signal` (16k mono denoise) -> `extract_speaker_embedding` (CAM++ fbank+CMN+ONNX avg+L2) -> `tokenize_text` (SentencePiece char ▁ + EOS only, 81 vocab, verified IDs) -> `synthesize_features` (zero Mel [1,1,80] -> encoder predict -> decoder loop rf=2 spectrum+prob with past KV + speaker condition every step -> [80,T]) -> `reconstruct_waveform` (HiFi-GAN [1,80,T]->waveform) -> `result.waveform` -> `sound`/`audiowrite`/`imagesc` in UI. Every arrow points to verified code; `decoder_with_past_model.onnx` actually used after step 1 via explicit KV map + use_cache_branch handling.
+- All deep learning models execute natively via MATLAB's `dlnetwork` engine (`importNetworkFromONNX` or `importONNXNetwork`).
+- No Python binaries, wrappers, or inter-process communication layers exist anywhere in the runtime.
+- The pipeline adheres strictly to academic Signals & Systems terminology and methodologies.

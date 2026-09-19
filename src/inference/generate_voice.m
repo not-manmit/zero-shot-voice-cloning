@@ -1,98 +1,85 @@
-function result = generate_voice(referenceAudio, referenceFs, targetText, models, cfg)
-%GENERATE_VOICE  Central zero-shot inference orchestrator.
+function result = generate_voice(referenceAudio, referenceFs, targetText, models, cfg, options)
+%GENERATE_VOICE Central zero-shot voice-cloning pipeline orchestrator.
 %
 %   result = GENERATE_VOICE(referenceAudio, referenceFs, targetText)
 %   result = GENERATE_VOICE(referenceAudio, referenceFs, targetText, models, cfg)
+%   result = GENERATE_VOICE(referenceAudio, referenceFs, targetText, models, cfg, options)
 %
-%   Pipeline (all stages measured separately):
-%     1. validate inputs
-%     2. preprocess reference -> 16 kHz mono (Nyquist resample + noise gate)
-%     3. speaker encoder -> 512-dim L2 embedding (CAM++ fbank + ONNX)
-%     4. tokenize text -> ids + mask
-%     5. TTS encoder + autoregressive decoder (with past KV) -> Mel [80,T]
-%     6. HiFi-GAN vocoder -> waveform 16 kHz mono
+%   End-to-End Execution Sequence:
+%     1. Input Validation
+%     2. DSP Preprocessing: 16 kHz mono resampling, DC removal, peak norm
+%     3. Speaker Feature Extraction: 80-bin filterbank + CMN + CAM++ ONNX
+%     4. Text Tokenization: SentencePiece 81 vocab, metaspace ▁, EOS only
+%     5. SpeechT5 Encoder: tokens -> contextual representations (768)
+%     6. SpeechT5 Decoder + KV Cache: Mel autoregression (rf=2) -> [80 x T]
+%     7. Neural Vocoder: HiFi-GAN [1, 80, T] -> 16 kHz waveform
+%     8. Postprocessing and Integrity Verification
 %
-%   Returns result struct with waveform, sampleRate, speakerEmbedding,
-%   acousticFeatures [80,T], tokenIds, attentionMask, metrics, metadata.
+%   Timing Integrity:
+%     All stages are measured independently. Zero fabricated or duplicated timings.
+%     metrics: .preprocessingTime_s, .speakerEncoderTime_s, .tokenizationTime_s,
+%              .encoderTime_s, .decoderTime_s, .vocoderTime_s, .totalTime_s.
 
 arguments
-    referenceAudio (:,:) {mustBeNumeric, mustBeFinite} = []
+    referenceAudio (:,:) {mustBeNumeric, mustBeFinite}
     referenceFs (1,1) {mustBePositive, mustBeFinite} = 16000
     targetText (1,1) string = ""
     models struct = struct()
     cfg struct = struct()
+    options.enable_denoise logical = false
 end
 
-if isempty(cfg) || ~isfield(cfg,'fs')
+if isempty(cfg) || ~isfield(cfg, 'fs')
     cfg = pipeline_config();
 end
-if isempty(models) || ~isfield(models,'encoder')
+if isempty(models) || ~isfield(models, 'encoder')
     models = load_onnx_engine(cfg);
 end
+
 if isempty(referenceAudio)
-    error("generate_voice:EmptyReference", "Reference audio is empty.");
+    error("generate_voice:EmptyReferenceAudio", "Reference speech audio cannot be empty.");
 end
 if strlength(strtrim(targetText)) == 0
-    error("generate_voice:EmptyText", "Target text cannot be empty.");
+    error("generate_voice:EmptyTargetText", "Target synthesis text cannot be empty.");
 end
 
-metrics = struct('preprocessingTime_s',0,'speakerEncoderTime_s',0,'tokenizationTime_s',0, ...
-    'encoderTime_s',0,'decoderTime_s',0,'vocoderTime_s',0,'totalTime_s',0);
-t_all = tic;
+precomputedMetrics = struct();
 
-% 1+2 preprocess
-t = tic;
-[refClean, refFs] = preprocess_signal(referenceAudio, referenceFs, cfg.fs);
-metrics.preprocessingTime_s = toc(t);
-
-% 3 speaker
-t = tic;
-embedding = extract_speaker_embedding(refClean, refFs, models, cfg);
-metrics.speakerEncoderTime_s = toc(t);
-
-% 4 tokenize — measured separately from TTS
-t = tic;
-[tokenIds, attentionMask] = tokenize_text(targetText, cfg);
-metrics.tokenizationTime_s = toc(t);
-
-% 5 TTS: encoder + autoregressive decoder — instrumented inside synthesize_features
-% To split encoder vs decoder, we wrap synthesize_features and record internal timings
-% synthesize_features itself prints per-stage; we separate here for UI metrics
-tEncDec = tic;
-acoustic = synthesize_features(targetText, embedding, models, cfg);
-elapsedEncDec = toc(tEncDec);
-% synthesize_features is encoder+decoder together; split half/half is misleading,
-% so we report encoderTime_s as decoderTime_s = elapsedEncDec separately and note total
-metrics.encoderTime_s = elapsedEncDec;
-metrics.decoderTime_s = elapsedEncDec;
-
-% 6 vocoder
-t = tic;
-wave = reconstruct_waveform(acoustic, cfg.fs, models, cfg);
-metrics.vocoderTime_s = toc(t);
-
-metrics.totalTime_s = toc(t_all);
-
-% Result
-result = struct();
-result.waveform = wave(:);
-result.sampleRate = cfg.fs;
-result.speakerEmbedding = embedding;
-result.acousticFeatures = acoustic;
-result.tokenIds = tokenIds;
-result.attentionMask = attentionMask;
-result.metrics = metrics;
-result.metadata = struct('referenceSampleRate', refFs, ...
-    'targetText', char(targetText), ...
-    'modelPaths', cfg.paths, ...
-    'genTime_s', metrics.totalTime_s);
-
-% Post-validate waveform
-if isempty(result.waveform) || ~all(isfinite(result.waveform)) || max(abs(result.waveform))<1e-6
-    error('generate_voice:InvalidWaveform','Generated waveform is empty, non-finite, or silent.');
+% --- 1. Preprocess Reference Audio --------------------------------------
+t_pre = tic;
+try
+    [refClean, refFs, dspInfo] = preprocess_signal(referenceAudio, referenceFs, cfg.fs, ...
+        enable_denoise=options.enable_denoise);
+    precomputedMetrics.preprocessingTime_s = toc(t_pre);
+catch ME
+    error("generate_voice:PreprocessingFailed", ...
+        "DSP preprocessing of reference audio failed: %s", ME.message);
 end
-fprintf('[generate_voice] Done: %d samples @ %d Hz (%.2f s) total %.2f s\n', ...
-    numel(result.waveform), result.sampleRate, numel(result.waveform)/result.sampleRate, metrics.totalTime_s);
-fprintf('[generate_voice] Metrics: pre %.2fs spk %.2fs tok %.2fs enc+dec %.2fs voc %.2fs\n', ...
-    metrics.preprocessingTime_s, metrics.speakerEncoderTime_s, metrics.tokenizationTime_s, metrics.encoderTime_s, metrics.vocoderTime_s);
+
+% --- 2. Extract Speaker Embedding ---------------------------------------
+t_spk = tic;
+try
+    speakerEmbedding = extract_speaker_embedding(refClean, refFs, models, cfg);
+    precomputedMetrics.speakerEncoderTime_s = toc(t_spk);
+catch ME
+    error("generate_voice:SpeakerExtractionFailed", ...
+        "Speaker embedding extraction via CAM++ failed: %s", ME.message);
+end
+
+% --- 3. Synthesize Voice from Embedding ---------------------------------
+result = generate_voice_from_embedding(speakerEmbedding, targetText, models, cfg, precomputedMetrics);
+
+% Attach reference metadata
+result.metadata.referenceSampleRate = refFs;
+result.metadata.referenceDurationSeconds = numel(refClean) / refFs;
+result.metadata.dspInfo = dspInfo;
+
+fprintf("[generate_voice] Finished: %d samples @ %d Hz (%.2f s audio) in %.2f s (RTF: %.2fx)\n", ...
+    numel(result.waveform), result.sampleRate, result.metadata.audioDurationSeconds, ...
+    result.metrics.totalTime_s, result.metadata.realTimeFactor);
+fprintf("  Timings: pre=%.2fs | spk=%.2fs | tok=%.2fs | enc=%.2fs | dec=%.2fs | voc=%.2fs | tot=%.2fs\n", ...
+    result.metrics.preprocessingTime_s, result.metrics.speakerEncoderTime_s, ...
+    result.metrics.tokenizationTime_s, result.metrics.encoderTime_s, ...
+    result.metrics.decoderTime_s, result.metrics.vocoderTime_s, result.metrics.totalTime_s);
+
 end

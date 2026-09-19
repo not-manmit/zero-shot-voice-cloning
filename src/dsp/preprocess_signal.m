@@ -1,111 +1,161 @@
-function [x_clean, fs] = preprocess_signal(x, fs, target_fs)
-%PREPROCESS_SIGNAL Prepare a discrete-time speech sequence for the pipeline.
-%   [x_clean, fs] = PREPROCESS_SIGNAL(x, fs) converts x to mono, resamples
-%   to 16 kHz (SpeechT5 native rate), suppresses stationary background
-%   noise via spectral gating, and peak-normalises the result to [-1, 1].
+function [x_clean, fs, dsp_info] = preprocess_signal(x, fs, target_fs, options)
+%PREPROCESS_SIGNAL Discrete-time speech preconditioning and conditioning chain.
 %
-%   [x_clean, fs] = PREPROCESS_SIGNAL(x, fs, target_fs) overrides the
-%   default 16 000 Hz target – useful for stand-alone DSP demonstrations.
+%   [x_clean, fs] = PREPROCESS_SIGNAL(x, fs)
+%   [x_clean, fs, dsp_info] = PREPROCESS_SIGNAL(x, fs, target_fs)
+%   [x_clean, fs, dsp_info] = PREPROCESS_SIGNAL(x, fs, target_fs, options)
 %
-%   The input x may be a row/column vector or a multi-channel matrix.
-%   The first 0.5 s is used as a noise-only reference when available.
+%   Signals & Systems Foundations:
+%   ------------------------------
+%   1. Multi-channel spatial down-mixing (spatial averaging to mono)
+%   2. Nyquist–Shannon anti-aliasing polyphase rational resampling to target_fs
+%   3. Zero-frequency (DC) bias removal: y[n] = x[n] - E[x[n]]
+%   4. Short-Time Fourier Transform (STFT) spectral analysis with periodic Hann windowing
+%   5. Safe, conservative spectral-domain noise attenuation (energy-gated)
+%   6. Inverse Short-Time Fourier Transform (ISTFT) synthesis via overlap-add
+%   7. Peak amplitude normalization to unity dynamic range: max(|x[n]|) = 1.0
+%   8. Hard bounding to [-1.0, 1.0] against numerical floating-point rounding
 %
-%   Signal-processing chain
-%   -----------------------
-%   1.  Mono mix-down  (mean across channels)
-%   2.  Nyquist–Shannon anti-alias resample to target_fs
-%   3.  DC bias removal  (subtract mean)
-%   4.  Stationary-noise spectral gate  (STFT domain)
-%   5.  Peak normalisation to unity amplitude
-%   6.  Hard clip to [-1, 1]  (guard against float rounding)
+%   Inputs:
+%     x         – Input discrete-time sequence (mono or multi-channel column/row matrix)
+%     fs        – Source sampling rate in Hz
+%     target_fs – Destination sampling rate in Hz (default: 16 000 Hz)
+%     options   – (optional) struct with fields:
+%                 .enable_denoise (logical, default: false for clean references to protect formants)
+%                 .denoise_gain_floor (double in (0, 1], default: 0.25 conservative)
 %
-%   Validation
-%   ----------
-%   - Empty input  → error
-%   - All-zero / silent signal  → zero output (no error)
-%   - NaN / Inf samples  → error (caught by mustBeFinite)
-%   - Short clips (< 1 s)  → noise gate skipped gracefully
+%   Outputs:
+%     x_clean   – Preconditioned mono discrete-time sequence [N x 1] at target_fs
+%     fs        – Target sampling frequency (16 000 Hz)
+%     dsp_info  – Diagnostic struct detailing applied DSP stages, energy, and SNR
 
 arguments
     x (:,:) {mustBeNumeric, mustBeFinite}
     fs (1,1) {mustBePositive, mustBeFinite}
     target_fs (1,1) {mustBePositive, mustBeFinite} = 16000
+    options.enable_denoise logical = false
+    options.denoise_gain_floor double = 0.25
 end
 
 if isempty(x)
-    error("preprocess_signal:EmptyInput", "Input audio cannot be empty.");
+    error("preprocess_signal:EmptyInput", "Input discrete-time audio sequence cannot be empty.");
 end
 
-% --- 1. Mono mix-down -----------------------------------------------
+dsp_info = struct();
+dsp_info.originalFs = fs;
+dsp_info.targetFs = target_fs;
+dsp_info.resampled = false;
+dsp_info.dcRemoved = false;
+dsp_info.denoiseApplied = false;
+
+% --- 1. Multi-Channel Spatial Down-Mixing -------------------------------
 x = double(x);
 if ~isvector(x)
-    x = mean(x, 2);          % average across channels (columns)
+    x = mean(x, 2); % Spatial average across columns
 else
-    x = x(:);                 % ensure column vector
+    x = x(:);       % Ensure column vector orientation [N x 1]
 end
 
-% --- 2. Resample to target_fs (Nyquist–Shannon anti-alias filter) ----
-if fs ~= target_fs
-    [p, q] = rat(target_fs / fs, 1e-4);   % rational approximation P/Q
-    x = resample(x, p, q);                 % polyphase anti-alias filter
+% --- 2. Nyquist–Shannon Anti-Aliasing Resampling ------------------------
+% To prevent spectral aliasing when converting between sampling domains,
+% apply polyphase rational interpolation/decimation with a Kaiser/FIR anti-aliasing filter.
+if abs(fs - target_fs) > 1
+    [p, q] = rat(target_fs / fs, 1e-4);
+    x = resample(x, p, q);
+    dsp_info.resampled = true;
+    dsp_info.resampleRatio = [p, q];
 end
 fs = target_fs;
 
-% --- 3. DC bias removal ---------------------------------------------
-x = x - mean(x);
+% --- 3. DC Bias / Mean Removal ------------------------------------------
+% Eliminates recording hardware DC offsets that would distort Fourier spectrum at 0 Hz
+dc_offset = mean(x);
+x = x - dc_offset;
+dsp_info.dcRemoved = true;
+dsp_info.dcOffset = dc_offset;
 
-% --- 4. Spectral noise gate -----------------------------------------
-x = suppress_stationary_noise(x, fs);
+% --- 4. Conservative Spectral-Domain Noise Attenuation ------------------
+% Crucial Voice-Cloning Protection:
+% Do NOT blindly assume t in [0, 0.5] s is silent noise! If the speaker begins
+% speaking at t=0, treating [0, 0.5] s as noise will subtract the speaker's
+% own formant frequencies, severely degrading vocal naturalness and timbre.
+if options.enable_denoise
+    [x, dsp_info.denoiseApplied] = conservative_spectral_gate(x, fs, options.denoise_gain_floor);
+else
+    dsp_info.denoiseApplied = false;
+end
 
-% --- 5. Peak normalisation ------------------------------------------
+% --- 5. Peak Normalization and Dynamic Range Bounding -------------------
 peak = max(abs(x), [], "all");
+dsp_info.preNormPeak = peak;
+
 if peak > eps
     x_clean = x ./ peak;
 else
-    % Silent or near-silent audio – return zero vector without error.
+    % Silent audio sequence
     x_clean = zeros(size(x));
-    return
+    dsp_info.postNormPeak = 0;
+    return;
 end
 
-% --- 6. Hard clip ---------------------------------------------------
-x_clean = max(-1, min(1, x_clean));
+% Guard against float precision overflow
+x_clean = max(-1.0, min(1.0, x_clean));
+dsp_info.postNormPeak = max(abs(x_clean));
+dsp_info.durationSeconds = numel(x_clean) / fs;
+dsp_info.sampleCount = numel(x_clean);
+
 end
 
-function y = suppress_stationary_noise(x, fs)
-%SUPPRESS_STATIONARY_NOISE Conservative STFT-domain spectral gate.
-%   Uses the first 0.5 s as a noise reference.  Gain is clamped to
-%   [0.08, 1] so that speech energy is never completely zeroed out.
-%   For clips shorter than 0.5 s the noise floor is estimated from the
-%   entire signal, which degrades suppression quality gracefully.
+function [y, applied] = conservative_spectral_gate(x, fs, gainFloor)
+% CONSERVATIVE_SPECTRAL_GATE
+% Identifies minimum energy frames across the signal to form an accurate
+% stationary noise profile without corrupting initial speech formants.
+applied = false;
+y = x;
 
-N   = 1024;
-hop = 256;
-window = hann(N, "periodic");
+N = 1024;    % Frame length
+hop = 256;   % Hop size (75% overlap)
+win = hann(N, "periodic");
 
-noise_samples = min(numel(x), max(N, round(0.5 * fs)));
-noise_seg     = x(1:noise_samples);
-
-[Sn, ~, ~]   = stft(noise_seg, fs, Window=window, ...
-                     OverlapLength=N-hop, FFTLength=N);
-noise_floor  = median(abs(Sn), 2);            % per-frequency median power
-
-[S, ~, ~]    = stft(x, fs, Window=window, ...
-                    OverlapLength=N-hop, FFTLength=N);
-magnitude    = abs(S);
-phase        = angle(S);
-threshold    = max(noise_floor * 1.5, eps);    % per-bin threshold
-gain         = max(0.08, min(1, magnitude ./ threshold));
-
-S_filtered   = gain .* magnitude .* exp(1i .* phase);
-y            = istft(S_filtered, fs, Window=window, ...
-                     OverlapLength=N-hop, FFTLength=N);
-y            = y(:);
-
-% Trim / zero-pad to original length
-n_in = numel(x);
-if numel(y) > n_in
-    y = y(1:n_in);
-elseif numel(y) < n_in
-    y(end+1:n_in, 1) = 0;
+if numel(x) < 2 * N
+    % Signal too short for reliable spectral analysis
+    return;
 end
+
+% 1. STFT decomposition
+[S, ~, ~] = stft(x, fs, Window=win, OverlapLength=N-hop, FFTLength=N);
+mag = abs(S);
+phi = angle(S);
+nFrames = size(mag, 2);
+
+if nFrames < 4
+    return;
+end
+
+% 2. Energy-guided noise floor estimation:
+% Find 15% lowest-energy frames across the utterance instead of assuming t=0 is silence
+frame_energy = sum(mag.^2, 1);
+[~, sort_order] = sort(frame_energy, 'ascend');
+nNoiseFrames = max(2, round(0.15 * nFrames));
+noise_frame_indices = sort_order(1:nNoiseFrames);
+
+noise_floor = median(mag(:, noise_frame_indices), 2);
+
+% 3. Spectral Wiener-like gain calculation with conservative floor
+threshold = max(noise_floor * 1.5, eps);
+gain = max(gainFloor, min(1.0, mag ./ threshold));
+
+% 4. Frequency-domain reconstruction & synthesis
+S_clean = gain .* mag .* exp(1i .* phi);
+y_synth = istft(S_clean, fs, Window=win, OverlapLength=N-hop, FFTLength=N);
+y = y_synth(:);
+
+% Align output length exactly with input
+if numel(y) > numel(x)
+    y = y(1:numel(x));
+elseif numel(y) < numel(x)
+    y(end+1:numel(x), 1) = 0;
+end
+
+applied = true;
 end

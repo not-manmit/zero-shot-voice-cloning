@@ -1,120 +1,74 @@
 function models = load_onnx_engine(cfg, force_reload)
-%LOAD_ONNX_ENGINE  Load and cache all SpeechT5 + HiFi-GAN ONNX sub-models.
+%LOAD_ONNX_ENGINE Load, inspect, and cache all SpeechT5 + HiFi-GAN ONNX sub-models.
 %
 %   models = LOAD_ONNX_ENGINE()
 %   models = LOAD_ONNX_ENGINE(cfg)
 %   models = LOAD_ONNX_ENGINE(cfg, force_reload)
 %
-%   Returns a struct with four importONNXNetwork objects and the x-vector
-%   speaker encoder, loaded once and cached in a persistent variable for
-%   the lifetime of the MATLAB session.  Subsequent calls return the
-%   cached struct without re-loading.
+%   Loads all 5 sub-models using the centralized import_onnx_model helper,
+%   caches them in a persistent variable across the MATLAB session, and
+%   validates basic structural availability.
 %
-%   Models loaded
-%   -------------
-%   models.encoder       – SpeechT5 text encoder (encoder_model.onnx)
-%   models.decoder       – SpeechT5 decoder, first step (decoder_model.onnx)
-%   models.decoder_kv    – SpeechT5 decoder, cached-KV step
-%                          (decoder_with_past_model.onnx)
-%   models.vocoder       – HiFi-GAN neural vocoder (vocoder_model.onnx)
-%   models.spk_encoder   – SpeechBrain TDNN x-vector (xvector_encoder.onnx)
-%   models.loaded        – logical true once all models are loaded
-%   models.load_time_s   – wall-clock load time in seconds
-%
-%   Inputs
-%   ------
-%   cfg          – (optional) struct from pipeline_config()
-%   force_reload – (optional) logical; if true, ignores cache and reloads
-%                  all models.  Useful after replacing ONNX files.
-%
-%   Error behaviour
-%   ---------------
-%   Missing files → error with path and download instruction.
-%   importONNXNetwork failure → error with ONNX-specific guidance.
-%   Unsupported operator → error listing the operator name.
+%   Fields returned:
+%     .encoder       – SpeechT5 text encoder (dlnetwork)
+%     .decoder       – SpeechT5 decoder first-step (dlnetwork)
+%     .decoder_kv    – SpeechT5 decoder with past KV cache (dlnetwork)
+%     .vocoder       – HiFi-GAN neural vocoder (dlnetwork)
+%     .spk_encoder   – CAM++ speaker embedding model (dlnetwork)
+%     .contract      – Canonical model_contract() struct
+%     .meta          – Per-model import forensic metadata
+%     .loaded        – logical true
+%     .load_time_s   – total wall-clock loading time in seconds
 
 arguments
     cfg          struct  = struct()
     force_reload logical = false
 end
 
-% -----------------------------------------------------------------------
-% Persistent model cache  (survives across function calls in one session)
-% -----------------------------------------------------------------------
 persistent CACHED_MODELS;
 
-if ~isempty(CACHED_MODELS) && CACHED_MODELS.loaded && ~force_reload
+if ~isempty(CACHED_MODELS) && isfield(CACHED_MODELS, 'loaded') && CACHED_MODELS.loaded && ~force_reload
     models = CACHED_MODELS;
-    return
+    return;
 end
 
-% -----------------------------------------------------------------------
-% Resolve configuration
-% -----------------------------------------------------------------------
 if ~isfield(cfg, 'paths')
     cfg = pipeline_config();
 end
 
-fprintf("[load_onnx_engine] Loading SpeechT5 + HiFi-GAN models ...\n");
+fprintf("[load_onnx_engine] Loading SpeechT5 + CAM++ + HiFi-GAN ONNX models ...\n");
 t_start = tic;
 
-% -----------------------------------------------------------------------
-% Helper to load a single ONNX file with a clear error message
-% -----------------------------------------------------------------------
-    function net = load_one(label, path_)
-        if ~isfile(path_)
-            error("load_onnx_engine:MissingFile", ...
-                "Model file not found: %s\n" + ...
-                "Run scripts/setup_matlab_online.m to download it.", path_);
-        end
-        fprintf("  [%s] importing %s ...\n", label, path_);
-        % Xenova exports use opset 14-17; importONNXNetwork supports up to 17 in R2024a.
-        % Use regression output type and preserve dynamic axes.
-        try
-            net = importONNXNetwork(path_, OutputLayerType="regression", TargetNetwork="dlnetwork");
-        catch ME1
-            try
-                net = importONNXNetwork(path_, OutputLayerType="regression");
-            catch
-                error("load_onnx_engine:ImportFailed", ...
-                    "importONNXNetwork failed for %s.\n" + ...
-                    "Reason: %s\n" + ...
-                    "Check that Deep Learning Toolbox Converter for ONNX is installed, and that the ONNX " + ...
-                    "file is valid (opset ≤ 17). The Xenova fp32 exports are opset 14.", path_, ME1.message);
-            end
-        end
-        fprintf("  [%s] OK inputs:%s outputs:%s\n", label, strjoin(cellstr(net.InputNames),','), strjoin(cellstr(net.OutputNames),','));
-    end
-
-% -----------------------------------------------------------------------
-% Load all sub-models
-% -----------------------------------------------------------------------
 m = struct();
+m.meta = struct();
+m.cfg = cfg;
+m.contract = model_contract();
 
-m.encoder    = load_one("encoder",    cfg.paths.encoder);
-m.decoder    = load_one("decoder",    cfg.paths.decoder);
-m.decoder_kv = load_one("decoder_kv", cfg.paths.decoder_kv);
-m.vocoder    = load_one("vocoder",    cfg.paths.vocoder);
-m.spk_encoder = load_one("spk_encoder", cfg.paths.spk_encoder);
-m.contract   = model_contract();
-m.cfg        = cfg;
+modelKeys = {'encoder', 'decoder', 'decoder_kv', 'vocoder', 'spk_encoder'};
+filePaths = {cfg.paths.encoder, cfg.paths.decoder, cfg.paths.decoder_kv, cfg.paths.vocoder, cfg.paths.spk_encoder};
 
-% -----------------------------------------------------------------------
-% Legacy embedding table (optional) — not required for zero-shot
-% -----------------------------------------------------------------------
-m.xvectors = [];
-if isfile(cfg.paths.spk_embeddings)
-    fprintf("  [spk_embeddings] legacy table present (ignored for zero-shot): %s\n", cfg.paths.spk_embeddings);
+for i = 1:numel(modelKeys)
+    k = modelKeys{i};
+    p = filePaths{i};
+    fprintf("  [%s] importing: %s\n", k, p);
+    try
+        [net, meta] = import_onnx_model(p);
+        m.(k) = net;
+        m.meta.(k) = meta;
+        fprintf("  [%s] OK (via %s, %d inputs, %d outputs)\n", ...
+            k, meta.apiUsed, numel(meta.inputNames), numel(meta.outputNames));
+    catch ME
+        error("load_onnx_engine:SubmodelImportFailure", ...
+            "Failed to load sub-model '%s' from %s.\nError: %s\nRun scripts/setup_matlab_online.m or scripts/download_weights.m.", ...
+            k, p, ME.message);
+    end
 end
 
-% -----------------------------------------------------------------------
-% Finalise
-% -----------------------------------------------------------------------
-m.loaded       = true;
-m.load_time_s  = toc(t_start);
-
-fprintf("[load_onnx_engine] All models loaded in %.1f s\n", m.load_time_s);
+m.loaded = true;
+m.load_time_s = toc(t_start);
+fprintf("[load_onnx_engine] All 5 sub-models successfully imported in %.2f s.\n", m.load_time_s);
 
 CACHED_MODELS = m;
 models = CACHED_MODELS;
+
 end

@@ -1,34 +1,69 @@
 function test_end_to_end()
-%TEST_END_TO_END Full pipeline: ref -> embedding -> tokens -> TTS -> vocoder -> waveform
+%TEST_END_TO_END Synthetic pipeline integrity smoke test.
+%
+%   NOTE ON TESTING PURPOSE:
+%     This test exercises complete end-to-end pipeline execution from end to end
+%     using a deterministic synthetic signal (multi-sine wave).
+%     Its purpose is to verify architectural and computational connectivity:
+%       Synthetic signal -> Preprocessing -> CAM++ Embedding -> Tokenizer ->
+%       SpeechT5 Encoder -> SpeechT5 Decoder + KV Cache -> Mel -> HiFi-GAN -> Waveform.
+%
+%     THIS IS NOT REAL VOICE-CLONING VALIDATION.
+%     Real human voice-cloning validation is performed in:
+%       tests/test_end_to_end_real_reference.m
+
+fprintf("[test_end_to_end] Executing synthetic pipeline integrity smoke test ...\n");
 
 cfg = pipeline_config();
-required = {cfg.paths.encoder, cfg.paths.decoder, cfg.paths.decoder_kv, cfg.paths.vocoder, cfg.paths.spk_encoder};
-for i=1:numel(required)
-    assert(isfile(required{i}), sprintf('Required model assets are unavailable: %s', required{i}));
+
+requiredModels = {cfg.paths.encoder, cfg.paths.decoder, cfg.paths.decoder_kv, cfg.paths.vocoder, cfg.paths.spk_encoder};
+for i = 1:numel(requiredModels)
+    if ~isfile(requiredModels{i})
+        error("test_end_to_end:MissingModel", ...
+            "Required model asset is unavailable: %s\nRun scripts/setup_matlab_online.m.", requiredModels{i});
+    end
 end
 
 models = load_onnx_engine(cfg);
+
+% 1. Synthesize 2.0 s Multi-Sine Audio Fixture
 fs = cfg.fs;
-% 2 s synthetic reference
-t = (0:1/fs:2-1/fs)';
-refAudio = 0.6*sin(2*pi*180*t) + 0.2*sin(2*pi*240*t) + 0.05*randn(size(t));
-refAudio = refAudio / max(abs(refAudio));
+t = (0:1/fs:2.0-1/fs)';
+synthetic_signal = 0.5 * sin(2*pi*220*t) + 0.25 * sin(2*pi*440*t) + 0.05 * randn(size(t));
+synthetic_signal = synthetic_signal / max(abs(synthetic_signal));
 
-result = generate_voice(refAudio, fs, 'Hello, this is a zero-shot voice cloning demonstration in MATLAB.', models, cfg);
-assert(~isempty(result.waveform), 'Waveform empty');
-assert(all(isfinite(result.waveform)), 'Waveform non-finite');
-assert(result.sampleRate == cfg.fs, 'Sample rate mismatch');
-assert(numel(result.waveform) > 0 && numel(result.waveform)/result.sampleRate > 0.3, 'Waveform duration too short');
-assert(max(abs(result.waveform)) <= 1+1e-6, 'Waveform amplitude invalid');
-assert(~isempty(result.speakerEmbedding) && numel(result.speakerEmbedding)==cfg.spk_emb_dim, 'Bad embedding');
-assert(~isempty(result.acousticFeatures) && size(result.acousticFeatures,1)==cfg.n_mels, 'Bad acoustic');
-assert(all(isfinite(result.acousticFeatures),'all'), 'Acoustic non-finite');
-% Verify it can be written
-tmp = fullfile(tempdir,'test_e2e.wav');
-audiowrite(tmp, result.waveform, result.sampleRate);
-assert(isfile(tmp), 'audiowrite e2e failed');
-delete(tmp);
+test_sentence = "This is a synthetic pipeline integrity smoke test in MATLAB.";
 
-fprintf('[test_end_to_end] OK: %d samples @%dHz, %d mel frames, total %.2fs\n', ...
-    numel(result.waveform), result.sampleRate, size(result.acousticFeatures,2), result.metrics.totalTime_s);
+% 2. Execute Full Generation Pipeline
+t_pipeline = tic;
+result = generate_voice(synthetic_signal, fs, test_sentence, models, cfg);
+total_elapsed = toc(t_pipeline);
+
+% 3. Verify Complete Structural Output
+assert(~isempty(result.waveform), "Generated waveform is empty");
+assert(all(isfinite(result.waveform)), "Waveform contains non-finite values");
+assert(result.sampleRate == cfg.fs, "Output sample rate must match cfg.fs (16 000 Hz)");
+assert(numel(result.waveform) > fs * 0.5, "Synthesized waveform is suspiciously brief (< 0.5 s)");
+assert(max(abs(result.waveform)) <= 1.0 + eps, "Waveform amplitude exceeds [-1, 1]");
+
+assert(numel(result.speakerEmbedding) == cfg.spk_emb_dim, "Speaker embedding dimension mismatch");
+assert(size(result.acousticFeatures, 1) == cfg.n_mels, "Acoustic feature bin count mismatch");
+assert(all(isfinite(result.acousticFeatures), 'all'), "Acoustic feature matrix contains NaN or Inf");
+
+% 4. Audiowrite Sanity Check
+tmpDest = fullfile(tempdir, 'test_e2e_synthetic_output.wav');
+try
+    audiowrite(tmpDest, result.waveform, result.sampleRate);
+    assert(isfile(tmpDest), "audiowrite failed to create output file");
+    delete(tmpDest);
+catch ME
+    if isfile(tmpDest); delete(tmpDest); end
+    rethrow(ME);
+end
+
+fprintf("[test_end_to_end] Synthetic pipeline integrity smoke test PASSED (%.2f s total).\n", total_elapsed);
+fprintf("  Waveform samples: %d (%.2f s at %d Hz)\n", ...
+    numel(result.waveform), numel(result.waveform)/result.sampleRate, result.sampleRate);
+fprintf("  Acoustic frames:  %d Mel frames\n", size(result.acousticFeatures, 2));
+
 end
