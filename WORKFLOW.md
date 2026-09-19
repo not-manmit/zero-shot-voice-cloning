@@ -50,16 +50,6 @@ Exclude the following from version control:
     - Uses `websave` (or similar) to download heavy ONNX files **directly** to the MATLAB Drive runtime environment.  
     - Documents expected URLs / sources and target paths within the repo structure.  
 
-Example pattern (conceptual, not to be executed locally):
-
-```matlab
-% scripts/download_weights.m
-url = "[https://example.com/models/xtts_v2.onnx](https://example.com/models/xtts_v2.onnx)";
-filename = "xtts_v2.onnx";
-savePath = fullfile(pwd, "models", "weights", filename);
-websave(savePath, url);
-```
-
 All such downloads must be performed by the developer inside MATLAB Online, not by the AI agent locally.
 
 ## Git Commit Conventions (Recommended)
