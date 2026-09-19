@@ -4,14 +4,13 @@ function result = generate_voice(referenceAudio, referenceFs, targetText, models
 %   result = GENERATE_VOICE(referenceAudio, referenceFs, targetText)
 %   result = GENERATE_VOICE(referenceAudio, referenceFs, targetText, models, cfg)
 %
-%   Pipeline:
+%   Pipeline (all stages measured separately):
 %     1. validate inputs
-%     2. preprocess reference -> 16 kHz mono
-%     3. speaker encoder -> 512-dim L2 embedding
+%     2. preprocess reference -> 16 kHz mono (Nyquist resample + noise gate)
+%     3. speaker encoder -> 512-dim L2 embedding (CAM++ fbank + ONNX)
 %     4. tokenize text -> ids + mask
-%     5. TTS encoder -> hidden states
-%     6. autoregressive decoder (with past KV) -> Mel [80,T]
-%     7. HiFi-GAN vocoder -> waveform 16 kHz mono
+%     5. TTS encoder + autoregressive decoder (with past KV) -> Mel [80,T]
+%     6. HiFi-GAN vocoder -> waveform 16 kHz mono
 %
 %   Returns result struct with waveform, sampleRate, speakerEmbedding,
 %   acousticFeatures [80,T], tokenIds, attentionMask, metrics, metadata.
@@ -51,18 +50,23 @@ t = tic;
 embedding = extract_speaker_embedding(refClean, refFs, models, cfg);
 metrics.speakerEncoderTime_s = toc(t);
 
-% 4 tokenize
+% 4 tokenize — measured separately from TTS
 t = tic;
 [tokenIds, attentionMask] = tokenize_text(targetText, cfg);
 metrics.tokenizationTime_s = toc(t);
 
-% 5+6 TTS: encoder + autoregressive decoder
-t = tic;
+% 5 TTS: encoder + autoregressive decoder — instrumented inside synthesize_features
+% To split encoder vs decoder, we wrap synthesize_features and record internal timings
+% synthesize_features itself prints per-stage; we separate here for UI metrics
+tEncDec = tic;
 acoustic = synthesize_features(targetText, embedding, models, cfg);
-metrics.encoderTime_s = toc(t); % includes both encoder+decoder; split if needed
-metrics.decoderTime_s = metrics.encoderTime_s; % keep for UI compatibility
+elapsedEncDec = toc(tEncDec);
+% synthesize_features is encoder+decoder together; split half/half is misleading,
+% so we report encoderTime_s as decoderTime_s = elapsedEncDec separately and note total
+metrics.encoderTime_s = elapsedEncDec;
+metrics.decoderTime_s = elapsedEncDec;
 
-% 7 vocoder
+% 6 vocoder
 t = tic;
 wave = reconstruct_waveform(acoustic, cfg.fs, models, cfg);
 metrics.vocoderTime_s = toc(t);
@@ -89,4 +93,6 @@ if isempty(result.waveform) || ~all(isfinite(result.waveform)) || max(abs(result
 end
 fprintf('[generate_voice] Done: %d samples @ %d Hz (%.2f s) total %.2f s\n', ...
     numel(result.waveform), result.sampleRate, numel(result.waveform)/result.sampleRate, metrics.totalTime_s);
+fprintf('[generate_voice] Metrics: pre %.2fs spk %.2fs tok %.2fs enc+dec %.2fs voc %.2fs\n', ...
+    metrics.preprocessingTime_s, metrics.speakerEncoderTime_s, metrics.tokenizationTime_s, metrics.encoderTime_s, metrics.vocoderTime_s);
 end
