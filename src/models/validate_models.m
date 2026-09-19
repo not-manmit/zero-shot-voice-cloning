@@ -41,21 +41,22 @@ for i = 1:numel(modelNames)
     entry.exists = true;
 
     try
-        net = importONNXNetwork(path, OutputLayerType="regression");
+        % Try dlnetwork import first (preserves dynamic axes for transformers)
+        try
+            net = importONNXNetwork(path, OutputLayerType="regression", TargetNetwork="dlnetwork");
+        catch
+            net = importONNXNetwork(path, OutputLayerType="regression");
+        end
         entry.ok = true;
         entry.inputs = cellstr(net.InputNames);
         entry.outputs = cellstr(net.OutputNames);
         entry.inputDetails = describe_io(net, 'input');
-        entry.outputs = entry.outputs; % keep names
         entry.outputDetails = describe_io(net, 'output');
 
-        % Compare against contract
+        % Compare against contract — explicit exact names, case-insensitive
         expectedIn = {c.(cKey).inputs.name};
-        % For decoder_with_past, past tensors are dynamic count – check prefix
-        missing = setdiff(lower(expectedIn), lower(entry.inputs));
-        % Allow extra past tensors beyond the 4 fixed names
+        % For decoder_with_past, past tensors may be expanded as past_key_values.0 etc — check prefix
         if strcmp(name,'decoder_with_past')
-            % need at least the 4 core inputs
             core = expectedIn(1:4);
             missingCore = setdiff(lower(core), lower(entry.inputs));
             if ~isempty(missingCore)
@@ -63,17 +64,33 @@ for i = 1:numel(modelNames)
                 entry.error = sprintf('Decoder_with_past missing core inputs: %s (found %s)', strjoin(missingCore,','), strjoin(entry.inputs,','));
                 overallOk = false;
             end
-        elseif ~isempty(missing)
-            % strict for others
-            entry.ok = false;
-            entry.error = sprintf('Input name mismatch. Expected %s ; Found %s', strjoin(expectedIn,','), strjoin(entry.inputs,','));
-            overallOk = false;
+            % warn if past tensor count looks wrong
+            nPastInputs = numel(entry.inputs) - 4;
+            nPastOutputs = numel(entry.outputs) - 1; % minus logits
+            fprintf('[validate_models] decoder_with_past past tensors: %d inputs / %d outputs\n', nPastInputs, nPastOutputs);
+        else
+            missing = setdiff(lower(expectedIn), lower(entry.inputs));
+            extra = setdiff(lower(entry.inputs), lower(expectedIn));
+            if ~isempty(missing) || ~isempty(extra)
+                entry.ok = false;
+                entry.error = sprintf('Input name mismatch for %s. Expected [%s] Found [%s]', name, strjoin(expectedIn,','), strjoin(entry.inputs,','));
+                overallOk = false;
+            end
+            % Also check output count roughly
+            expectedOut = {c.(cKey).outputs.name};
+            if numel(entry.outputs) < numel(expectedOut)
+                entry.ok = false;
+                entry.error = sprintf('Output count mismatch for %s. Expected >=%d Found %d [%s]', name, numel(expectedOut), numel(entry.outputs), strjoin(entry.outputs,','));
+                overallOk = false;
+            end
         end
 
         fprintf('[validate_models] %-20s OK inputs:%s outputs:%s\n', name, strjoin(entry.inputs,','), strjoin(entry.outputs,','));
-        % Print detailed shape if available (via layers)
         for d = 1:numel(entry.inputDetails)
             fprintf('    input %s : %s\n', entry.inputDetails{d}.name, entry.inputDetails{d}.shape);
+        end
+        for d = 1:numel(entry.outputDetails)
+            fprintf('    output %s : %s\n', entry.outputDetails{d}.name, entry.outputDetails{d}.shape);
         end
 
     catch ME
