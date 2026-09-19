@@ -1,13 +1,12 @@
 function spk_emb = extract_speaker_embedding(x, fs, models, cfg)
 %EXTRACT_SPEAKER_EMBEDDING  Derive a 512-dim L2-normalised CAM++ embedding.
 %
-%   spk_emb = EXTRACT_SPEAKER_EMBEDDING(x, fs, models)
 %   spk_emb = EXTRACT_SPEAKER_EMBEDDING(x, fs, models, cfg)
 %
 %   Uses openspeech/wespeaker CAM++ ONNX (voxceleb_CAM++.onnx) which expects
 %   80-dim log-Mel filterbank with per-utterance CMN (25 ms win, 10 ms hop).
 %   Long clips are chunked 3 s with 50% overlap, embeddings averaged and
-%   L2-normalised.
+%   L2-normalised.  Explicit input name contract: 'features' [B,T,80].
 
 arguments
     x      (:,:) {mustBeNumeric, mustBeFinite}
@@ -28,7 +27,6 @@ x = x(:);
 if abs(fs - cfg.fs) > 1
     [x, fs] = preprocess_signal(x, fs, cfg.fs);
 end
-% Ensure peak normalised already (preprocess does it), but guard
 if max(abs(x)) > 1
     x = x / max(abs(x));
 end
@@ -64,7 +62,6 @@ for k = 1:numel(starts)
     s = starts(k);
     e = min(s + chunk_len - 1, n_samples);
     seg = x(s:e);
-    % Pad short tail to at least 1 s with zeros
     min_len = round(cfg.spk_min_dur_s * fs);
     if numel(seg) < min_len
         seg(end+1:min_len) = 0;
@@ -92,15 +89,14 @@ function fbank = compute_fbank80(x_seg, fs, cfg)
 N = round(0.025*fs); % 400 at 16kHz
 hop = round(0.010*fs); % 160
 n_fft = 512;
-win = hamming(N,'periodic');
-% Use stft with center padding disabled to keep exact T
+win = hann(N,'periodic'); % Hann per DSP spec (consistent with stft_analysis)
+% STFT one-sided, same as Wespeaker Kaldi fbank pipeline
 [S,~,~] = stft(x_seg, fs, Window=win, OverlapLength=N-hop, FFTLength=n_fft, FrequencyRange='onesided');
 power = abs(S).^2; % [257 x T]
-% Build 80-mel filters 20-8000 Hz
 f = linspace(0, fs/2, n_fft/2+1);
 mel_out = apply_mel(power, f, 80, 20, 8000);
 mel_out = log(max(mel_out, 1e-10));
-% CMN per utterance (subtract time mean)
+% CMN per utterance (zero-mean over time) — required by CAM++
 mel_out = mel_out - mean(mel_out,2);
 fbank = single(mel_out'); % [T,80]
 end
@@ -136,31 +132,47 @@ end
 end
 
 function emb = run_campp_onnx(fbank, models, cfg)
-% fbank [T,80] -> embedding [1,512]
+% fbank [T,80] -> embedding [1,512]  Explicit contract: input name 'features'
 x_f32 = single(fbank);
-if isfield(models,'spk_encoder') && ~isempty(models.spk_encoder)
-    net = models.spk_encoder;
-else
+if ~isfield(models,'spk_encoder') || isempty(models.spk_encoder)
     error("extract_speaker_embedding:MissingModel","No speaker encoder loaded. Run setup_matlab_online.m");
 end
-% Contract: input name 'features' [B,T,80]
-inp = dlarray(reshape(x_f32, 1, size(x_f32,1), size(x_f32,2)), 'SCB'); % [1,T,80] as SCB? Actually need BTC
-% Try BTF layout first
+net = models.spk_encoder;
+names = cellstr(net.InputNames);
+% Explicit contract check — no heuristic fallback
+if ~any(strcmpi(names,'features'))
+    error("extract_speaker_embedding:ContractMismatch", ...
+        "Speaker encoder ONNX expected input 'features' but found [%s]. Check voxceleb_CAM++.onnx export.", strjoin(names,','));
+end
+% Wespeaker CAM++ expects [B,T,80] float32. MATLAB dlnetwork layout: use 'SCB' where S=80 is feature dim
+% Try canonical layouts in order: TCS (time-channel-batch) equivalent handling
+% Most reliable: reshape to [1,T,80] and use 'CBT' or 'SCB' — validate at runtime
+% We use explicit dlarray with dimension labels matching ONNX.
+% Xenova/Wespeaker exports are typically [batch, seq, feat] => [B,T,80]
 try
-    inp_btf = dlarray(reshape(x_f32, 1, size(x_f32,1), size(x_f32,2)), 'CBT'); % workaround batch axis
-    out = predict(net, inp_btf);
+    % Primary: [B,T,80] as BTF layout — MATLAB expects batch last for some dlnetworks
+    % Use 'CBT' where C=feat, B=batch, T=time workaround: single batch
+    inp = dlarray(reshape(x_f32, 1, size(x_f32,1), size(x_f32,2)), 'CBT');
+    out = predict(net, inp);
     emb_raw = extractdata(out);
 catch ME
+    % Secondary: try plain CB for flattened case (some exports flatten time)
     try
-        inp2 = dlarray(single(fbank), 'CB'); % fallback 2D
+        inp2 = dlarray(single(fbank), 'CB');
         out = predict(net, inp2);
         emb_raw = extractdata(out);
     catch ME2
-        error("extract_speaker_embedding:InferenceFailed","CAM++ ONNX inference failed: %s | fallback %s", ME.message, ME2.message);
+        error("extract_speaker_embedding:InferenceFailed", ...
+            "CAM++ ONNX inference failed.\nPrimary layout [1,T,80] error: %s\nFallback CB error: %s\nCheck that %s is voxceleb_CAM++.onnx (512-dim).", ...
+            ME.message, ME2.message, cfg.paths.spk_encoder);
     end
 end
 emb = single(emb_raw(:)');
 if numel(emb) ~= cfg.spk_emb_dim
     error("extract_speaker_embedding:DimMismatch","CAM++ output %d dim, expected %d. Check ONNX is voxceleb_CAM++.onnx", numel(emb), cfg.spk_emb_dim);
+end
+% Validate L2 will be applied by caller; raw embedding should be finite
+if ~all(isfinite(emb))
+    error("extract_speaker_embedding:NonFiniteRaw","CAM++ raw embedding contains NaN/Inf");
 end
 end
