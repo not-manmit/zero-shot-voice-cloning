@@ -83,7 +83,7 @@ t_start = tic;
                     "file is valid (opset ≤ 17). The Xenova fp32 exports are opset 14.", path_, ME1.message);
             end
         end
-        fprintf("  [%s] OK inputs:%s\n", label, strjoin(cellstr(net.InputNames),','));
+        fprintf("  [%s] OK inputs:%s outputs:%s\n", label, strjoin(cellstr(net.InputNames),','), strjoin(cellstr(net.OutputNames),','));
     end
 
 % -----------------------------------------------------------------------
@@ -100,21 +100,11 @@ m.contract   = model_contract();
 m.cfg        = cfg;
 
 % -----------------------------------------------------------------------
-% Verify speaker embedding lookup table is present
+% Legacy embedding table (optional) — not required for zero-shot
 % -----------------------------------------------------------------------
+m.xvectors = [];
 if isfile(cfg.paths.spk_embeddings)
-    fprintf("  [spk_embeddings] loading CMU-Arctic x-vectors ...\n");
-    tmp = load(cfg.paths.spk_embeddings);   % expects 'xvectors' variable
-    if isfield(tmp, 'xvectors')
-        m.xvectors = tmp.xvectors;   % struct with fields: speaker_id, embedding
-    else
-        warning("load_onnx_engine:BadEmbFile", ...
-            "cmu_arctic_xvectors.mat does not contain ''xvectors'' field. " + ...
-            "Re-run download_weights.m to regenerate it.");
-        m.xvectors = [];
-    end
-else
-    m.xvectors = [];
+    fprintf("  [spk_embeddings] legacy table present (ignored for zero-shot): %s\n", cfg.paths.spk_embeddings);
 end
 
 % -----------------------------------------------------------------------
