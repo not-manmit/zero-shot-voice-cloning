@@ -93,8 +93,16 @@ report = validate_models(cfg);
 fprintf("\n[setup_matlab_online] Summary\n");
 fprintf("  Project root: %s\n", project_root);
 fprintf("  Required toolboxes: %s\n", strjoin(check.required, ', '));
-fprintf("  Toolbox status: %s\n", string(check.ok ? "OK" : "MISSING REQUIRED COMPONENTS"));
-fprintf("  Model validation: %s\n", string(report.ok ? "OK" : "FAILED - see details above"));
+if check.ok
+    fprintf("  Toolbox status: OK\n");
+else
+    fprintf("  Toolbox status: MISSING REQUIRED COMPONENTS\n");
+end
+if report.ok
+    fprintf("  Model validation: OK\n");
+else
+    fprintf("  Model validation: FAILED - see details above\n");
+end
 
 if ~report.ok
     fprintf("\n[setup_matlab_online] Validation failed. Do NOT attempt Generate until fixed.\n");
