@@ -58,8 +58,8 @@ cfg.paths.decoder = fullfile(model_root, 'speecht5', 'decoder_model.onnx');
 cfg.paths.decoder_kv = fullfile(model_root, 'speecht5', 'decoder_with_past_model.onnx');
 cfg.paths.vocoder = fullfile(model_root, 'speecht5', 'vocoder_model.onnx');
 cfg.paths.spk_encoder = fullfile(model_root, 'xvector', 'xvector_encoder.onnx');
-cfg.paths.spk_embeddings = fullfile(model_root, 'xvector', 'cmu_arctic_xvectors.mat');
-cfg.paths.tokenizer_vocab = fullfile(model_root, 'speecht5', 'tokenizer_vocab.json');
+cfg.paths.spk_embeddings = fullfile(model_root, 'xvector', 'cmu_arctic_xvectors.mat'); % legacy, not required
+cfg.paths.tokenizer_vocab = fullfile(model_root, 'speecht5', 'tokenizer_vocab.json'); % optional
 
 % Explicit ONNX contracts verified against Xenova / openspeech exports via netx-ray.
 %  - Xenova/speecht5_tts encoder_model.onnx expects int64 input_ids [B,T] + attention_mask [B,T] -> last_hidden_state [B,T,768]
