@@ -80,10 +80,12 @@ for i = 1:numel(keys)
         mReport.apiUsed = meta.apiUsed;
         mReport.networkClass = meta.networkClass;
         mReport.isInitialized = meta.isInitialized;
+        mReport.hasPlaceholderLayers = meta.hasPlaceholderLayers;
 
         fprintf("  [OBSERVED] Import API:        %s\n", mReport.apiUsed);
         fprintf("  [OBSERVED] Network Class:     %s\n", mReport.networkClass);
         fprintf("  [OBSERVED] Initialized State: %s\n", string(mReport.isInitialized));
+        fprintf("  [OBSERVED] Placeholder Layers: %s\n", string(mReport.hasPlaceholderLayers));
 
         % Inspect Inputs
         inNames = meta.inputNames;
