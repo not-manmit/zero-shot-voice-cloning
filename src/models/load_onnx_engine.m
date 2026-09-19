@@ -53,6 +53,27 @@ for i = 1:numel(modelKeys)
     fprintf("  [%s] importing: %s\n", k, p);
     try
         [net, meta] = import_onnx_model(p);
+        % Pre-initialize dynamic dlnetwork models defensively
+        if isprop(net, 'Initialized') && ~net.Initialized
+            try
+                switch k
+                    case 'encoder'
+                        dummy_ids = dlarray(single(ones(1, 10)), 'UU');
+                        net = initialize(net, dummy_ids);
+                    case 'decoder'
+                        dummy_seq = dlarray(zeros(1, 1, 80, 'single'), 'UUU');
+                        dummy_h = dlarray(zeros(1, 10, 768, 'single'), 'UUU');
+                        dummy_mask = dlarray(ones(1, 10, 'single'), 'UU');
+                        dummy_spk = dlarray(zeros(1, 512, 'single'), 'UU');
+                        net = initialize(net, dummy_seq, dummy_h, dummy_mask, dummy_spk);
+                    case 'vocoder'
+                        dummy_mel = dlarray(zeros(10, 80, 'single'), 'UU');
+                        net = initialize(net, dummy_mel);
+                end
+            catch ME_init %#ok<NASGU>
+                % Non-blocking: tensor_contract_utils.predict_net initializes dynamically at runtime
+            end
+        end
         m.(k) = net;
         m.meta.(k) = meta;
         fprintf("  [%s] OK (via %s, %d inputs, %d outputs)\n", ...

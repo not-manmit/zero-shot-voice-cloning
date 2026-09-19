@@ -58,7 +58,7 @@ T_tokens = numel(enc_input_ids);
 t_enc = tic;
 try
     enc_inputs = tensor_contract_utils.format_encoder_inputs(enc_input_ids, models.encoder);
-    enc_out = predict(models.encoder, enc_inputs);
+    [enc_out, models.encoder] = tensor_contract_utils.predict_net(models.encoder, enc_inputs);
     enc_hidden = tensor_contract_utils.parse_encoder_outputs(enc_out, models.encoder);
 catch ME
     error("synthesize_features:EncoderFailed", ...
@@ -107,7 +107,12 @@ for step = 1:max_steps
     try
         dec_inputs = tensor_contract_utils.format_decoder_inputs( ...
             output_sequence, enc_hidden, enc_attn_mask, spk_vec, kv_cache, current_net, use_past);
-        dec_raw_out = predict(current_net, dec_inputs);
+        [dec_raw_out, current_net] = tensor_contract_utils.predict_net(current_net, dec_inputs);
+        if use_past
+            dec_kv_net = current_net;
+        else
+            models.decoder = current_net;
+        end
     catch ME
         error("synthesize_features:DecoderStepFailed", ...
             "SpeechT5 decoder failed at autoregressive step %d (usePast=%s, rf=%d):\nError: %s\nCheck models/speecht5 ONNX contract via scripts/diagnose_onnx.m.", ...

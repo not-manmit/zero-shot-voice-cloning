@@ -165,7 +165,7 @@ emb = [];
 % 1. Attempt forward pass with the imported CAM++ network
 try
     inp = tensor_contract_utils.format_campp_inputs(fbank, net);
-    out = predict(net, inp);
+    [out, net] = tensor_contract_utils.predict_net(net, inp);
     emb_raw = extractdata(out);
     emb = single(emb_raw(:)');
     if numel(emb) == cfg.spk_emb_dim && all(isfinite(emb))

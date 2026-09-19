@@ -365,5 +365,50 @@ classdef tensor_contract_utils
             % Shape = [T_mel, 80], Format = 'UU'
             formatted_input = dlarray(mel, 'UU');
         end
+
+        function [raw_out, net] = predict_net(net, inputs)
+            %PREDICT_NET Robust forward inference with automatic network initialization and multi-output capture.
+            %
+            %   [raw_out, net] = predict_net(net, inputs)
+            %
+            %   - Automatically initializes uninitialized dlnetwork objects before prediction.
+            %   - Correctly unpacks cell inputs (inputs{:}) for multiple input layers.
+            %   - Accurately captures all output layers when the network has multiple outputs.
+            %   - Returns the updated/initialized dlnetwork object.
+
+            if isprop(net, 'Initialized') && ~net.Initialized
+                try
+                    if iscell(inputs)
+                        net = initialize(net, inputs{:});
+                    else
+                        net = initialize(net, inputs);
+                    end
+                catch ME_init
+                    % Non-fatal warning if initialize throws; predict may still attempt execution
+                    warning("tensor_contract_utils:InitFailed", ...
+                        "dlnetwork initialization attempt encountered: %s", ME_init.message);
+                end
+            end
+
+            nOut = 1;
+            if isprop(net, 'OutputNames')
+                nOut = numel(net.OutputNames);
+            end
+
+            if nOut > 1
+                raw_out = cell(1, nOut);
+                if iscell(inputs)
+                    [raw_out{:}] = predict(net, inputs{:});
+                else
+                    [raw_out{:}] = predict(net, inputs);
+                end
+            else
+                if iscell(inputs)
+                    raw_out = predict(net, inputs{:});
+                else
+                    raw_out = predict(net, inputs);
+                end
+            end
+        end
     end
 end

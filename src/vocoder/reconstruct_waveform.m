@@ -57,7 +57,7 @@ mel = max(mel, log(cfg.mel_floor));
 % Format dlarray using centralized utility
 try
     voc_in = tensor_contract_utils.format_vocoder_inputs(mel, models.vocoder);
-    out = predict(models.vocoder, voc_in);
+    [out, models.vocoder] = tensor_contract_utils.predict_net(models.vocoder, voc_in);
     wave_raw = extractdata(out);
 catch ME
     error("reconstruct_waveform:InferenceFailed", ...

@@ -33,7 +33,7 @@ enc_inputs = tensor_contract_utils.format_encoder_inputs(token_ids, encoderNet);
 % 4. Run Forward Inference
 t_infer = tic;
 try
-    enc_raw_out = predict(encoderNet, enc_inputs);
+    [enc_raw_out, encoderNet] = tensor_contract_utils.predict_net(encoderNet, enc_inputs);
     elapsed = toc(t_infer);
 catch ME
     error("test_encoder:InferenceFailed", ...

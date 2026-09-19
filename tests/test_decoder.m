@@ -51,7 +51,7 @@ inputs_step1 = tensor_contract_utils.format_decoder_inputs( ...
     start_mel, enc_hidden, enc_mask, spk_emb, {}, decNet, false);
 
 try
-    raw_step1 = predict(decNet, inputs_step1);
+    [raw_step1, decNet] = tensor_contract_utils.predict_net(decNet, inputs_step1);
     elapsed1 = toc(t_step1);
 catch ME
     error("test_decoder:Step1Failed", ...
@@ -84,7 +84,7 @@ if isfile(cfg.paths.decoder_kv)
             in_mel, enc_hidden, enc_mask, spk_emb, past_kv, decKvNet, true);
 
         try
-            raw_kv = predict(decKvNet, inputs_kv);
+            [raw_kv, decKvNet] = tensor_contract_utils.predict_net(decKvNet, inputs_kv);
             elapsed_kv = toc(t_kv);
         catch ME
             error("test_decoder:KvStepFailed", ...
