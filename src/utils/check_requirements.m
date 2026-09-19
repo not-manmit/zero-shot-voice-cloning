@@ -44,6 +44,23 @@ if ~exist('importONNXNetwork','file')
     missing{end+1} = 'Deep Learning Toolbox Converter for ONNX Model Format (Support Package)'; %#ok<AGROW>
 end
 
+% MATLAB version gate: R2023b+ recommended for ONNX opset 14, R2024a+ for opset 17
+v = ver('MATLAB');
+relOk = true;
+try
+    yr = str2double(regexp(v.Release,'\d+','match','once'));
+    if ~isempty(yr) && yr < 2023
+        missing{end+1} = sprintf('MATLAB %s too old — requires R2023b+ (R2024a recommended)', v.Release); %#ok<AGROW>
+        relOk = false;
+    end
+catch
+end
+% Report version regardless
+fprintf('[check_requirements] MATLAB %s (%s)\n', v.Version, v.Release);
+if ~relOk
+    fprintf('[check_requirements] Update MATLAB via MATLAB Online version selector.\n');
+end
+
 result = struct();
 result.required = required;
 result.available = {available.Name};
