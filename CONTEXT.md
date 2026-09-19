@@ -17,7 +17,7 @@ AI / neural networks are strictly downstream components.
 
 The implementation must emphasize classic DSP algorithms in the code:
 
-1. **Nyquist–Shannon resampling** to 24 kHz  
+1. **Nyquist–Shannon resampling** to 16 kHz  
 2. **Time-domain noise suppression** (e.g., spectral subtraction / gating)  
 3. **Short-Time Fourier Transform (STFT)** with Hann windowing  
 4. **Linear-to-Mel scale transformation**
