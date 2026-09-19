@@ -36,7 +36,7 @@ classdef tensor_contract_utils
             end
 
             in_names = cellstr(net.InputNames);
-            input_ids = int64(input_ids(:)');
+            input_ids = single(input_ids(:)');
             T = numel(input_ids);
 
             if numel(in_names) == 1
@@ -48,8 +48,8 @@ classdef tensor_contract_utils
                     nm = lower(strtrim(in_names{i}));
                     if contains(nm, "input_ids")
                         formatted_inputs{i} = dlarray(input_ids, 'UU');
-                    elseif contains(nm, "mask")
-                        formatted_inputs{i} = dlarray(ones(1, T, 'int64'), 'UU');
+                    elseif contains(nm, "mask") || contains(nm, "attention")
+                        formatted_inputs{i} = dlarray(ones(1, T, 'single'), 'UU');
                     else
                         formatted_inputs{i} = dlarray(input_ids, 'UU');
                     end
@@ -134,7 +134,7 @@ classdef tensor_contract_utils
 
                 elseif contains(nm_lower, "mask") || contains(nm_lower, "attention") || contains(nm_lower, "attn")
                     % encoder_attention_mask / encoder_attention_ma: [1, T] format 'UU'
-                    mask_row = int64(reshape(enc_mask, 1, []));
+                    mask_row = single(reshape(enc_mask, 1, []));
                     formatted_inputs{i} = dlarray(mask_row, 'UU');
 
                 elseif contains(nm_lower, "past")
