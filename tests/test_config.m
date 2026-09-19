@@ -32,6 +32,7 @@ assert(cfg.spk_emb_dim == 512, "cfg.spk_emb_dim must be 512");
 assert(endsWith(cfg.paths.encoder, "encoder_model.onnx"), "Encoder path incorrect");
 assert(endsWith(cfg.paths.decoder, "decoder_model.onnx"), "Decoder path incorrect");
 assert(endsWith(cfg.paths.decoder_kv, "decoder_with_past_model.onnx"), "Decoder KV path incorrect");
+assert(endsWith(cfg.paths.decoder_with_past, "decoder_with_past_model.onnx"), "Decoder with past path incorrect");
 assert(endsWith(cfg.paths.vocoder, "vocoder_model.onnx"), "Vocoder path incorrect");
 assert(endsWith(cfg.paths.spk_encoder, "xvector_encoder.onnx"), "Speaker encoder path incorrect");
 

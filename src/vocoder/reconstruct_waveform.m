@@ -61,7 +61,7 @@ try
     wave_raw = extractdata(out);
 catch ME
     error("reconstruct_waveform:InferenceFailed", ...
-        "HiFi-GAN vocoder inference failed.\nError: %s\nExpected input: 'spectrogram' [1, 80, T] SCB.", ME.message);
+        "HiFi-GAN vocoder inference failed.\nError: %s\nExpected input: 'spectrogram' [T_mel, 80] format UU.", ME.message);
 end
 
 waveform = double(wave_raw(:));

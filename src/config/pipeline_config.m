@@ -56,31 +56,31 @@ cfg.paths.xvector_root = fullfile(model_root, 'xvector');
 cfg.paths.encoder = fullfile(model_root, 'speecht5', 'encoder_model.onnx');
 cfg.paths.decoder = fullfile(model_root, 'speecht5', 'decoder_model.onnx');
 cfg.paths.decoder_kv = fullfile(model_root, 'speecht5', 'decoder_with_past_model.onnx');
+cfg.paths.decoder_with_past = cfg.paths.decoder_kv; % Canonical alias for decoder_with_past
 cfg.paths.vocoder = fullfile(model_root, 'speecht5', 'vocoder_model.onnx');
 cfg.paths.spk_encoder = fullfile(model_root, 'xvector', 'xvector_encoder.onnx');
 cfg.paths.spk_embeddings = fullfile(model_root, 'xvector', 'cmu_arctic_xvectors.mat'); % legacy, not required
 cfg.paths.tokenizer_vocab = fullfile(model_root, 'speecht5', 'tokenizer_vocab.json'); % optional
 
-% Verified ONNX contracts — authoritative HF config + transformers.js:
-%  - encoder_model.onnx: int64 input_ids [B,T] + attention_mask [B,T] -> last_hidden_state [B,T,768]
-%  - decoder_model.onnx: float32 output_sequence [B,1,80] (zero start, then predicted Mel) + encoder_hidden_states [B,T,768] + encoder_attention_mask [B,T] + speaker_embeddings [B,512] -> spectrum [B,rf,80] + prob [B,rf] + past_key_values (rf=2). Some Xenova splits use input_ids int64 BOS fallback — detected at runtime.
-%  - decoder_with_past_model.onnx: same + past_key_values.* (+ optional use_cache_branch bool for merged)
-%  - Xenova/speecht5_hifigan model.onnx expects spectrogram [B,80,T] or [1,80,T] -> waveform [1,1,T*256]
-%  - openspeech CAM++ expects fbank [B,T,80] -> embedding [B,512]
+% Verified ONNX contracts — authoritative MATLAB R2026a importNetworkFromONNX inspection:
+%  - encoder_model.onnx: int64 input_ids [1, T] format UU -> last_hidden_state [1, T, 768] (NO attention_mask input)
+%  - decoder_model.onnx: speaker_embeddings [1, 512], encoder_hidden_state [1, T, 768], output_sequence [1, 1, 80], encoder_attention_mask [1, T]
+%    -> spectrumOutput [rf, 80], probOutput [1, rf], plus 24 present KV outputs
+%  - decoder_with_past_model.onnx: speaker_embeddings, 24 past KV inputs, output_sequence, encoder_attention_mask
+%    -> spectrumOutput, probOutput, plus 12 decoder present KV outputs
+%  - vocoder_model.onnx: spectrogram [T_mel, 80] format UU -> waveformOutput [1, 1, T*256]
+%  - xvector_encoder.onnx: feats [1, T, 80] format UUU -> embsOutput [1, 512]
 cfg.onnx = struct();
-cfg.onnx.encoder_inputs = {'input_ids', 'attention_mask'};
+cfg.onnx.encoder_inputs = {'input_ids'};
 cfg.onnx.encoder_outputs = {'last_hidden_state'};
-% Decoder: primary contract is float Mel (output_sequence). Keep legacy int64 'input_ids' as fallback for older split exports — synthesize_features detects at runtime.
-cfg.onnx.decoder_inputs_float = {'output_sequence', 'encoder_hidden_states', 'encoder_attention_mask', 'speaker_embeddings'};
-cfg.onnx.decoder_inputs_legacy = {'input_ids', 'encoder_hidden_states', 'encoder_attention_mask', 'speaker_embeddings'};
-cfg.onnx.decoder_inputs = cfg.onnx.decoder_inputs_float;
-cfg.onnx.decoder_outputs = {'spectrum', 'prob'}; % spectrum [B,rf,80], prob [B,rf] (separate heads, not packed 81)
-cfg.onnx.decoder_with_past_inputs = {'output_sequence', 'encoder_hidden_states', 'encoder_attention_mask', 'speaker_embeddings', 'past_key_values'};
-cfg.onnx.decoder_with_past_outputs = {'spectrum', 'prob'};
+cfg.onnx.decoder_inputs = {'speaker_embeddings', 'encoder_hidden_state', 'output_sequence', 'encoder_attention_mask'};
+cfg.onnx.decoder_outputs = {'spectrumOutput', 'probOutput'};
+cfg.onnx.decoder_with_past_inputs = {'speaker_embeddings', 'output_sequence', 'encoder_attention_mask'}; % plus 24 past KV
+cfg.onnx.decoder_with_past_outputs = {'spectrumOutput', 'probOutput'};
 cfg.onnx.vocoder_inputs = {'spectrogram'};
-cfg.onnx.vocoder_outputs = {'waveform'};
-cfg.onnx.spk_inputs = {'features'}; % [B, T, 80] fbank
-cfg.onnx.spk_outputs = {'embedding'};
+cfg.onnx.vocoder_outputs = {'waveformOutput'};
+cfg.onnx.spk_inputs = {'feats'};
+cfg.onnx.spk_outputs = {'embsOutput'};
 
 cfg.samples_per_frame = cfg.hop_length;
 

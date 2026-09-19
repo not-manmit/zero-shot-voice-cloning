@@ -1,21 +1,23 @@
 function [net, meta] = import_onnx_model(modelPath, options)
-%IMPORT_ONNX_MODEL Centralized, version-aware ONNX importer for MATLAB.
+%IMPORT_ONNX_MODEL Centralized, version-aware ONNX importer for MATLAB R2026a+.
 %
 %   [net, meta] = IMPORT_ONNX_MODEL(modelPath)
 %   [net, meta] = IMPORT_ONNX_MODEL(modelPath, options)
 %
 %   Design Principles:
-%     1. Prefers current MATLAB API: importNetworkFromONNX (R2023b+ recommended)
-%     2. Falls back to importONNXNetwork only if the modern API is absent
-%     3. Never silently hides a failed modern import behind an obsolete fallback
+%     1. Prefers current MATLAB API: importNetworkFromONNX (R2026a native)
+%     2. Avoids calling legacy importONNXNetwork when modern importer is present,
+%        preventing legacy "Subscripted assignment between dissimilar structures" errors.
+%     3. Does not classify a partially imported uninitialized or placeholder-containing
+%        network as a fully inference-ready import.
 %     4. Returns rich diagnostic metadata (InputNames, OutputNames, shapes, API used)
-%     5. Fails with actionable diagnostic error messages
+%     5. Fails with actionable diagnostic error messages.
 %
 %   Outputs:
-%     net  – imported dlnetwork or dagnet object
+%     net  – imported dlnetwork object
 %     meta – struct with forensic inspection details:
 %            .path, .fileSizeBytes, .apiUsed, .networkClass,
-%            .inputNames, .outputNames, .isInitialized, .error
+%            .inputNames, .outputNames, .isInitialized, .hasPlaceholderLayers, .error
 
 arguments
     modelPath (1,1) string
@@ -31,6 +33,7 @@ meta.networkClass = "unknown";
 meta.inputNames = strings(0,1);
 meta.outputNames = strings(0,1);
 meta.isInitialized = false;
+meta.hasPlaceholderLayers = false;
 meta.error = "";
 
 % 1. File existence check
@@ -68,43 +71,34 @@ net = [];
 importSuccess = false;
 lastError = [];
 
-% 3. Attempt importNetworkFromONNX (Primary, modern API)
+% 3. Modern import via importNetworkFromONNX (Primary, preferred for R2026a)
 if hasModernImport
+    meta.apiUsed = "importNetworkFromONNX";
     try
-        meta.apiUsed = "importNetworkFromONNX";
-        % importNetworkFromONNX creates dlnetwork directly in current releases
-        try
-            net = importNetworkFromONNX(modelPath, TargetNetwork=options.TargetNetwork, OutputLayerType=options.OutputLayerType);
-        catch
-            % Some releases do not accept OutputLayerType for importNetworkFromONNX
-            net = importNetworkFromONNX(modelPath, TargetNetwork=options.TargetNetwork);
-        end
+        % In MATLAB R2026a, importNetworkFromONNX accepts model path directly
+        net = importNetworkFromONNX(modelPath);
         importSuccess = true;
     catch ME
-        lastError = ME;
-        meta.error = sprintf("importNetworkFromONNX failed: %s", ME.message);
+        % If direct call failed, try with TargetNetwork if supported
+        try
+            net = importNetworkFromONNX(modelPath, TargetNetwork="dlnetwork");
+            importSuccess = true;
+        catch
+            lastError = ME;
+            meta.error = sprintf("importNetworkFromONNX failed: %s", ME.message);
+        end
     end
 end
 
-% 4. Fallback to importONNXNetwork only if modern import was absent or genuinely failed
-if ~importSuccess && hasLegacyImport
+% 4. Fallback to legacy importONNXNetwork ONLY on ancient MATLAB where modern is completely absent
+if ~importSuccess && ~hasModernImport && hasLegacyImport
+    meta.apiUsed = "importONNXNetwork (legacy fallback)";
     try
-        meta.apiUsed = "importONNXNetwork (fallback)";
-        try
-            net = importONNXNetwork(modelPath, OutputLayerType=options.OutputLayerType, TargetNetwork=options.TargetNetwork);
-        catch
-            net = importONNXNetwork(modelPath, OutputLayerType=options.OutputLayerType);
-        end
+        net = importONNXNetwork(modelPath, OutputLayerType=options.OutputLayerType);
         importSuccess = true;
     catch ME_legacy
-        if isempty(lastError)
-            lastError = ME_legacy;
-        else
-            lastError = MException("import_onnx_model:BothImportersFailed", ...
-                sprintf("Both modern and legacy importers failed for %s.\nModern error: %s\nLegacy error: %s", ...
-                modelPath, lastError.message, ME_legacy.message));
-        end
-        meta.error = lastError.message;
+        lastError = ME_legacy;
+        meta.error = sprintf("importONNXNetwork failed: %s", ME_legacy.message);
     end
 end
 
@@ -117,13 +111,13 @@ if ~importSuccess
         "  Error details: %s\n" ...
         "  Likely causes:\n" ...
         "    - Missing 'Deep Learning Toolbox Converter for ONNX Model Format'\n" ...
-        "    - Unsupported ONNX opset (SpeechT5 fp32 uses opset 14, quantized may use opset 17+)\n" ...
+        "    - Unsupported ONNX operator or opset\n" ...
         "    - Corrupted download file (re-download with scripts/download_weights(true))"], ...
         modelPath, meta.fileSizeBytes / 1e6, meta.apiUsed, version, lastError.message);
     error(errId, "%s", errMsg);
 end
 
-% 5. Inspect imported network properties
+% 5. Inspect imported network properties and initialization state
 meta.networkClass = class(net);
 if isprop(net, 'InputNames')
     meta.inputNames = string(net.InputNames);
@@ -131,10 +125,28 @@ end
 if isprop(net, 'OutputNames')
     meta.outputNames = string(net.OutputNames);
 end
+
+isInit = true;
 if isprop(net, 'Initialized')
-    meta.isInitialized = net.Initialized;
-else
-    meta.isInitialized = true; % Older DAG objects consider themselves initialized
+    isInit = net.Initialized;
 end
+
+hasPlaceholders = false;
+if isprop(net, 'Layers')
+    try
+        layers = net.Layers;
+        layerClasses = arrayfun(@class, layers, 'UniformOutput', false);
+        layerNames = {layers.Name};
+        isPhClass = contains(layerClasses, 'placeholder', 'IgnoreCase', true);
+        isPhName = contains(layerNames, 'placeholder', 'IgnoreCase', true);
+        hasPlaceholders = any(isPhClass | isPhName);
+    catch
+    end
+end
+
+meta.hasPlaceholderLayers = hasPlaceholders;
+% Do not classify a partially imported uninitialized or placeholder-bearing network
+% as fully inference-ready
+meta.isInitialized = isInit && ~hasPlaceholders;
 
 end

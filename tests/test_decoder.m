@@ -63,7 +63,7 @@ end
 fprintf("  Step 1 succeeded in %.2f s:\n", elapsed1);
 fprintf("    Spectrum shape: %s (finite: %s)\n", mat2str(size(spectrum1)), string(all(isfinite(spectrum1), 'all')));
 fprintf("    Stop prob:      %s (raw logit: %s)\n", mat2str(prob1), mat2str(raw_logit1));
-fprintf("    KV tensors:     %d extracted\n", numel(past_kv));
+fprintf("    KV tensors:     %d extracted\n", numel(fieldnames(past_kv)));
 
 assert(size(spectrum1, 2) == cfg.n_mels, sprintf("Spectrum must have %d Mel bins", cfg.n_mels));
 assert(all(isfinite(spectrum1), 'all'), "Step 1 spectrum contains NaN/Inf");
@@ -92,9 +92,10 @@ if isfile(cfg.paths.decoder_kv)
                 s, ME.message, strjoin(decKvMeta.inputNames, ", "));
         end
 
-        [spectrum_s, prob_s, ~, past_kv] = tensor_contract_utils.parse_decoder_outputs(raw_kv, decKvNet, rf);
+        % Pass past_kv to preserve the retained encoder KV tensors across steps
+        [spectrum_s, prob_s, ~, past_kv] = tensor_contract_utils.parse_decoder_outputs(raw_kv, decKvNet, rf, past_kv);
         fprintf("    Step %d: %.2f s | Spectrum: %s | Stop prob: %s | KV count: %d\n", ...
-            s, elapsed_kv, mat2str(size(spectrum_s)), mat2str(prob_s), numel(past_kv));
+            s, elapsed_kv, mat2str(size(spectrum_s)), mat2str(prob_s), numel(fieldnames(past_kv)));
 
         assert(all(isfinite(spectrum_s), 'all'), sprintf("Step %d spectrum contains NaN/Inf", s));
         assert(size(spectrum_s, 2) == cfg.n_mels, "Spectrum Mel bins mismatch in KV loop");

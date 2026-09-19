@@ -57,12 +57,12 @@ T_tokens = numel(enc_input_ids);
 % --- 2. Encoder Forward Pass (TIMED INDEPENDENTLY) ----------------------
 t_enc = tic;
 try
-    enc_inputs = tensor_contract_utils.format_encoder_inputs(enc_input_ids, enc_attn_mask, models.encoder);
+    enc_inputs = tensor_contract_utils.format_encoder_inputs(enc_input_ids, models.encoder);
     enc_out = predict(models.encoder, enc_inputs);
     enc_hidden = tensor_contract_utils.parse_encoder_outputs(enc_out, models.encoder);
 catch ME
     error("synthesize_features:EncoderFailed", ...
-        "SpeechT5 encoder forward pass failed.\nError: %s\nInputs: input_ids [%d tokens], attention_mask.", ...
+        "SpeechT5 encoder forward pass failed.\nError: %s\nInputs: input_ids [%d tokens].", ...
         ME.message, T_tokens);
 end
 timings.encoderTime_s = toc(t_enc);
@@ -80,19 +80,25 @@ t_dec = tic;
 % Starting token: all-zero Mel frame [1, 1, 80] per SpeechT5 specification
 output_sequence = single(zeros(1, 1, cfg.n_mels));
 acoustic_frames = []; % Will accumulate [T_frames x 80]
-past_kv = {};
+kv_cache = struct();
 
 % Step calculation
 max_steps = min(cfg.max_decoder_steps, max(30, round(cfg.max_len_ratio * T_tokens / rf)));
 min_steps = max(0, round(cfg.min_len_ratio * T_tokens / rf));
 
-has_kv_model = isfield(models, 'decoder_kv') && ~isempty(models.decoder_kv);
+dec_kv_net = [];
+if isfield(models, 'decoder_with_past') && ~isempty(models.decoder_with_past)
+    dec_kv_net = models.decoder_with_past;
+elseif isfield(models, 'decoder_kv') && ~isempty(models.decoder_kv)
+    dec_kv_net = models.decoder_kv;
+end
+has_kv_model = ~isempty(dec_kv_net);
 
 for step = 1:max_steps
-    use_past = (step > 1) && has_kv_model && ~isempty(past_kv);
+    use_past = (step > 1) && has_kv_model && ~isempty(fieldnames(kv_cache));
 
     if use_past
-        current_net = models.decoder_kv;
+        current_net = dec_kv_net;
     else
         current_net = models.decoder;
     end
@@ -100,7 +106,7 @@ for step = 1:max_steps
     % Format decoder inputs
     try
         dec_inputs = tensor_contract_utils.format_decoder_inputs( ...
-            output_sequence, enc_hidden, enc_attn_mask, spk_vec, past_kv, current_net, use_past);
+            output_sequence, enc_hidden, enc_attn_mask, spk_vec, kv_cache, current_net, use_past);
         dec_raw_out = predict(current_net, dec_inputs);
     catch ME
         error("synthesize_features:DecoderStepFailed", ...
@@ -109,8 +115,7 @@ for step = 1:max_steps
     end
 
     % Parse outputs: spectrum [rf x 80], calibrated stop probabilities [1 x rf], new KV cache
-    [spectrum_frames, stop_probs, ~, new_kv] = tensor_contract_utils.parse_decoder_outputs(dec_raw_out, current_net, rf);
-    past_kv = new_kv;
+    [spectrum_frames, stop_probs, ~, kv_cache] = tensor_contract_utils.parse_decoder_outputs(dec_raw_out, current_net, rf, kv_cache);
 
     % Verify numerical finiteness
     if ~all(isfinite(spectrum_frames), 'all')

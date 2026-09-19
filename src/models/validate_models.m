@@ -52,8 +52,11 @@ allPassed = reqCheck.ok;
 
 for i = 1:numel(modelKeys)
     key = modelKeys{i};
-    mPath = cfg.paths.(key);
-    cEntry = contract.(key);
+    if strcmp(key, 'decoder_with_past') && ~isfield(cfg.paths, 'decoder_with_past') && isfield(cfg.paths, 'decoder_kv')
+        mPath = cfg.paths.decoder_kv;
+    else
+        mPath = cfg.paths.(key);
+    end
 
     entry = struct();
     entry.key = key;
@@ -112,56 +115,50 @@ for i = 1:numel(modelKeys)
 
     switch key
         case 'encoder'
+            % Verified contract: ONLY input_ids [1, T] format UU. No attention_mask.
             hasInputIds = any(contains(lowerIn, "input_ids"));
-            hasMask = any(contains(lowerIn, "mask"));
             hasHidden = any(contains(lowerOut, "hidden"));
 
-            if ~hasInputIds || ~hasMask
+            if ~hasInputIds
                 hasFailure = true;
-                entry.message = sprintf("Encoder missing input_ids or attention_mask. Observed: [%s]", strjoin(entry.inputs, ", "));
+                entry.message = sprintf("Encoder missing input_ids. Observed: [%s]", strjoin(entry.inputs, ", "));
             elseif ~hasHidden
                 hasWarning = true;
                 entry.message = sprintf("Encoder output name '%s' differs from 'last_hidden_state'.", strjoin(entry.outputs, ", "));
             end
 
         case 'decoder'
-            isFloatMel = any(contains(lowerIn, "output_sequence")) || any(contains(lowerIn, "input_values")) || any(contains(lowerIn, "spectrogram"));
-            isLegacyInt = any(contains(lowerIn, "input_ids")) && ~isFloatMel;
+            % Verified contract: speaker_embeddings, encoder_hidden_state, output_sequence, encoder_attention_mask
             hasSpk = any(contains(lowerIn, "speaker"));
-            hasSpectrum = any(contains(lowerOut, "spectrum")) || any(contains(lowerOut, "feat")) || any(contains(lowerOut, "mel"));
+            hasHidden = any(contains(lowerIn, "hidden"));
+            hasSeq = any(contains(lowerIn, "output_sequence"));
+            hasMask = any(contains(lowerIn, "mask"));
+            hasSpectrum = any(contains(lowerOut, "spectrum")) || any(contains(lowerOut, "feat"));
             hasProb = any(contains(lowerOut, "prob")) || any(contains(lowerOut, "logit"));
 
-            if ~isFloatMel && ~isLegacyInt
+            if ~hasSpk || ~hasHidden || ~hasSeq || ~hasMask
                 hasFailure = true;
-                entry.message = sprintf("Decoder inputs [%s] match neither float output_sequence nor legacy input_ids.", strjoin(entry.inputs, ", "));
-            elseif isLegacyInt
-                hasWarning = true;
-                entry.message = "Decoder uses legacy int64 input_ids contract instead of modern float output_sequence.";
+                entry.message = sprintf("Decoder missing required core inputs. Observed: [%s]", strjoin(entry.inputs, ", "));
             end
-
-            if ~hasSpk
-                hasFailure = true;
-                entry.message = sprintf("Decoder missing speaker_embeddings input. Found: [%s]", strjoin(entry.inputs, ", "));
-            end
-
-            if ~(hasSpectrum && hasProb) && ~any(strcmp(lowerOut, "logits"))
+            if ~hasSpectrum || ~hasProb
                 hasWarning = true;
-                entry.message = sprintf("Decoder output head names [%s] differ from canonical [spectrum, prob].", strjoin(entry.outputs, ", "));
+                entry.message = sprintf("Decoder output head names [%s] differ from canonical [spectrumOutput, probOutput].", strjoin(entry.outputs, ", "));
             end
 
         case 'decoder_with_past'
+            % Verified contract: 24 past KV inputs, speaker_embeddings, output_sequence, encoder_attention_mask
             nPastIn = sum(contains(lowerIn, "past") | contains(lowerIn, "key") | contains(lowerIn, "value") | contains(lowerIn, "cache"));
             nPastOut = sum(contains(lowerOut, "present") | contains(lowerOut, "past") | contains(lowerOut, "key") | contains(lowerOut, "value") | contains(lowerOut, "cache"));
 
             if nPastIn == 0
                 hasFailure = true;
                 entry.message = "decoder_with_past has 0 recognized past KV input tensors.";
-            elseif nPastIn ~= nPastOut && nPastOut > 0
-                hasWarning = true;
-                entry.message = sprintf("Asymmetric KV tensor count: %d past inputs vs %d present outputs.", nPastIn, nPastOut);
+            else
+                fprintf("  [INFO] decoder_with_past: %d past KV inputs (12 decoder + 12 encoder), %d decoder present KV outputs.\n", nPastIn, nPastOut);
             end
 
         case 'vocoder'
+            % Verified contract: spectrogram [T_mel, 80] format UU -> waveformOutput
             hasSpec = any(contains(lowerIn, "spectrogram")) || any(contains(lowerIn, "mel"));
             hasWave = any(contains(lowerOut, "waveform")) || any(contains(lowerOut, "audio"));
 
@@ -171,20 +168,27 @@ for i = 1:numel(modelKeys)
             end
             if ~hasWave
                 hasWarning = true;
-                entry.message = sprintf("Vocoder output name [%s] differs from canonical 'waveform'.", strjoin(entry.outputs, ", "));
+                entry.message = sprintf("Vocoder output name [%s] differs from canonical 'waveformOutput'.", strjoin(entry.outputs, ", "));
             end
 
         case 'spk_encoder'
-            hasFeat = any(contains(lowerIn, "features")) || any(contains(lowerIn, "fbank"));
-            hasEmb = any(contains(lowerOut, "embedding")) || any(contains(lowerOut, "embs"));
+            % Verified contract: feats [1, T, 80] format UUU -> embsOutput
+            hasFeat = any(contains(lowerIn, "feat")) || any(contains(lowerIn, "fbank"));
+            hasEmb = any(contains(lowerOut, "emb"));
 
             if ~hasFeat
                 hasFailure = true;
-                entry.message = sprintf("Speaker encoder missing 'features' input. Found: [%s]", strjoin(entry.inputs, ", "));
+                entry.message = sprintf("Speaker encoder missing 'feats' input. Found: [%s]", strjoin(entry.inputs, ", "));
             end
             if ~hasEmb
                 hasWarning = true;
-                entry.message = sprintf("Speaker encoder output name [%s] differs from 'embedding'.", strjoin(entry.outputs, ", "));
+                entry.message = sprintf("Speaker encoder output name [%s] differs from 'embsOutput'.", strjoin(entry.outputs, ", "));
+            end
+
+            % Check for placeholder layers in CAM++
+            if meta.hasPlaceholderLayers || ~meta.isInitialized
+                hasWarning = true;
+                entry.message = "CAM++ contains unsupported AveragePool (ceil_mode) and BatchNormalization (training_mode) placeholder layers.";
             end
     end
 

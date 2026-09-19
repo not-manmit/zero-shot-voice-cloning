@@ -27,8 +27,8 @@ test_text = "The quick brown fox jumps over the lazy dog.";
 T = numel(token_ids);
 fprintf("  Input sequence length: %d tokens (with EOS)\n", T);
 
-% 3. Format dlarray Inputs
-enc_inputs = tensor_contract_utils.format_encoder_inputs(token_ids, attn_mask, encoderNet);
+% 3. Format dlarray Inputs (verified contract: input_ids only, shape [1, T], format UU)
+enc_inputs = tensor_contract_utils.format_encoder_inputs(token_ids, encoderNet);
 
 % 4. Run Forward Inference
 t_infer = tic;

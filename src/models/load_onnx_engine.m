@@ -64,6 +64,10 @@ for i = 1:numel(modelKeys)
     end
 end
 
+% Expose canonical alias so both models.decoder_kv and models.decoder_with_past work seamlessly
+m.decoder_with_past = m.decoder_kv;
+m.meta.decoder_with_past = m.meta.decoder_kv;
+
 m.loaded = true;
 m.load_time_s = toc(t_start);
 fprintf("[load_onnx_engine] All 5 sub-models successfully imported in %.2f s.\n", m.load_time_s);
