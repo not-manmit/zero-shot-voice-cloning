@@ -46,9 +46,14 @@ classdef VoiceClonerApp < handle
             app.StatusLabel = uilabel(app.UIFigure, Text="Initializing – loading ONNX models...", Position=[500 470 460 22]);
             app.MetricsLabel = uilabel(app.UIFigure, Text="Metrics: –", Position=[500 445 460 22]);
 
-            app.ReferenceAxes = uiaxes(app.UIFigure, Position=[30 290 430 140], Title="Reference Speech Waveform");
-            app.OutputAxes = uiaxes(app.UIFigure, Position=[500 290 430 140], Title="Cloned Speech Waveform");
-            app.MelAxes = uiaxes(app.UIFigure, Position=[30 60 900 190], Title="Synthesized 80-bin Mel Spectrogram");
+            app.ReferenceAxes = uiaxes(app.UIFigure, Position=[30 290 430 140]);
+            title(app.ReferenceAxes, "Reference Speech Waveform");
+
+            app.OutputAxes = uiaxes(app.UIFigure, Position=[500 290 430 140]);
+            title(app.OutputAxes, "Cloned Speech Waveform");
+
+            app.MelAxes = uiaxes(app.UIFigure, Position=[30 60 900 190]);
+            title(app.MelAxes, "Synthesized 80-bin Mel Spectrogram");
 
             app.loadModels();
         end
@@ -265,6 +270,9 @@ classdef VoiceClonerApp < handle
         end
 
         function updateReferencePlot(app)
+            if isempty(app.ReferenceAxes) || ~isvalid(app.ReferenceAxes)
+                return;
+            end
             if isempty(app.ReferenceAudio)
                 cla(app.ReferenceAxes);
                 return;
@@ -278,6 +286,9 @@ classdef VoiceClonerApp < handle
         end
 
         function updateOutputPlot(app)
+            if isempty(app.OutputAxes) || ~isvalid(app.OutputAxes)
+                return;
+            end
             if isempty(app.GeneratedAudio)
                 cla(app.OutputAxes);
                 return;
@@ -292,6 +303,9 @@ classdef VoiceClonerApp < handle
         end
 
         function updateMelPlot(app, mel)
+            if isempty(app.MelAxes) || ~isvalid(app.MelAxes)
+                return;
+            end
             try
                 cla(app.MelAxes);
                 imagesc(app.MelAxes, mel);
