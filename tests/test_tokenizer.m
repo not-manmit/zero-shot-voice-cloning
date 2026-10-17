@@ -51,5 +51,14 @@ assert(idsLong(end)==cfg.eos_token_id, 'EOS not preserved after truncation');
 [idsL,~]=tokenize_text("hello", cfg);
 assert(~isequal(idsH,idsL), 'Tokenizer should be case-sensitive');
 
-fprintf('[test_tokenizer] All assertions passed (verified vocab, no BOS, case preserved, metaspace).\n');
+% Target test sentence from forensic analysis
+test_sent = "Hello, this is a zero-shot voice cloning demonstration in MATLAB.";
+[idsSent, maskSent] = tokenize_text(test_sent, cfg);
+assert(idsSent(1) == 4, 'Target sentence must begin with metaspace (ID 4)');
+assert(idsSent(end) == cfg.eos_token_id, 'Target sentence must end with EOS (ID 2)');
+assert(all(idsSent >= 0 & idsSent <= 80), 'All token IDs must lie within [0, 80]');
+assert(numel(idsSent) == numel(maskSent), 'Attention mask dimension mismatch');
+assert(numel(idsSent) >= 60, 'Expected at least 60 tokens for test sentence');
+
+fprintf('[test_tokenizer] All assertions passed (verified 81 vocab, no BOS, case preserved, metaspace).\n');
 end
