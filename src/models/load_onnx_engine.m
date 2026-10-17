@@ -113,6 +113,9 @@ end
 m.decoder_with_past = m.decoder_kv;
 m.meta.decoder_with_past = m.meta.decoder_kv;
 
+% Pre-load verified SpeechBrain CMU Arctic x-vector anchors
+m.xvector_anchors = get_canonical_xvectors(cfg);
+
 m.loaded = true;
 m.load_time_s = toc(t_start);
 fprintf("[load_onnx_engine] All 5 sub-models successfully imported in %.2f s.\n", m.load_time_s);
