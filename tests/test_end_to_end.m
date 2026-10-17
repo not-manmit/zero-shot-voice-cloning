@@ -46,9 +46,8 @@ catch ME
        contains(ME.identifier, "SpeakerExtractionFailed")
         fprintf("  [NOTICE] CAM++ speaker extraction blocked by AveragePool placeholder layers.\n");
         fprintf("  Validating downstream pipeline (SpeechT5 Encoder -> Decoder+KV -> HiFi-GAN Vocoder) with normalized speaker embedding ...\n");
-        rng(42);
-        dummy_emb = single(randn(1, cfg.spk_emb_dim));
-        dummy_emb = dummy_emb / norm(dummy_emb);
+        anchors = get_canonical_xvectors(cfg);
+        dummy_emb = anchors.vectors(1, :);
         result = generate_voice_from_embedding(dummy_emb, test_sentence, models, cfg);
         usedFallbackEmbedding = true;
     else
