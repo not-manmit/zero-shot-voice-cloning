@@ -33,7 +33,7 @@ cfg.num_mel_bins = 80;
 cfg.reduction_factor = 2;  % verified: microsoft/speecht5_tts config.json reduction_factor=2 (each decoder step emits 2 Mel frames)
 
 cfg.max_text_len = 450;
-cfg.min_len_ratio = 0.0;
+cfg.min_len_ratio = 3.0;  % CRITICAL: was 0.0 which caused premature stop at 69 frames (1.10s gibberish)
 cfg.max_len_ratio = 20.0;
 cfg.stop_threshold = 0.5;
 cfg.max_decoder_steps = 500; % autoregressive limit (aligns with SpeechT5 max mel length)
