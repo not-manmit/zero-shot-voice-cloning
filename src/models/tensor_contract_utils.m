@@ -372,10 +372,12 @@ classdef tensor_contract_utils
             end
 
             raw = single(raw_in(:)');
-            if numel(raw) > rf
-                raw = raw(1:rf);
-            elseif numel(raw) < rf && numel(raw) > 0
-                raw = repmat(raw(1), 1, rf);
+            % CRITICAL FIX: In full-sequence mode, probOutput has s*rf entries.
+            % The stop probabilities for the current step are the LAST rf entries!
+            if numel(raw) >= rf
+                raw = raw(end-rf+1:end);
+            elseif numel(raw) > 0
+                raw = repmat(raw(end), 1, rf);
             end
 
             % SpeechT5 probOutput is a raw linear projection (logit) for stop token
