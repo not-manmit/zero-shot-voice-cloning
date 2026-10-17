@@ -86,10 +86,16 @@ classdef tensor_contract_utils
 
             if ndims(raw) == 2 && sz(2) == 768
                 hidden_states = reshape(raw, 1, sz(1), 768);
+            elseif ndims(raw) == 2 && sz(1) == 768
+                hidden_states = reshape(raw.', 1, sz(2), 768);
+            elseif ndims(raw) == 3 && sz(1) == 1 && sz(3) == 768
+                hidden_states = raw;
+            elseif ndims(raw) == 3 && sz(1) == 768 && sz(3) == 1
+                hidden_states = permute(raw, [3, 2, 1]);
+            elseif ndims(raw) == 3 && sz(1) == 1 && sz(2) == 768
+                hidden_states = permute(raw, [1, 3, 2]);
             elseif ndims(raw) == 3 && sz(3) == 768
                 hidden_states = raw;
-            elseif ndims(raw) == 3 && sz(2) == 768
-                hidden_states = permute(raw, [1, 3, 2]);
             else
                 hidden_states = raw;
             end
