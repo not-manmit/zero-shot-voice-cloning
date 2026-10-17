@@ -91,36 +91,40 @@ t_dec = tic;
 
 % Starting token: all-zero Mel frame [1, 1, 80] per SpeechT5 specification
 output_sequence = single(zeros(1, 1, cfg.n_mels));
-postnet_frames = [];    % Accumulated POSTNET Mel frames for final output -> HiFi-GAN
-prepostnet_frames = []; % Accumulated pre-postnet frames (for diagnostics / fallback)
+accumulated_postnet_frames = [];
+current_full_mel = [];
 kv_cache = struct();
 
 % Sentence length estimation and step bounds
-L_chars = max(1, double(strlength(strtrim(target_text))));
-expected_mel_frames = round(L_chars * 3.5);
+% Standard English speech rate: ~3.8 Mel frames per character token (16 ms/frame)
+expected_mel_frames = round(T_tokens * 3.8);
+min_steps = max(25, round(0.80 * expected_mel_frames / rf));
+max_steps_for_text = min(cfg.max_decoder_steps, max(min_steps + 25, round(1.35 * expected_mel_frames / rf)));
 
-% Minimum steps before stop token is allowed, and hard maximum steps for this sentence
-min_steps = max(10, round(0.5 * expected_mel_frames / rf));
-max_steps_for_text = min(cfg.max_decoder_steps, max(min_steps + 10, round(1.5 * expected_mel_frames / rf)));
+fprintf("[synthesize_features] Target text (%d tokens): expected ~%d frames (~%.2f s). Step bounds: min=%d, max=%d\n", ...
+    T_tokens, expected_mel_frames, expected_mel_frames * 256 / cfg.fs, min_steps, max_steps_for_text);
 
-fprintf("[synthesize_features] Target text (%d chars): expected ~%d frames (~%.2f s). Step bounds: min=%d, max=%d\n", ...
-    L_chars, expected_mel_frames, expected_mel_frames * 256 / cfg.fs, min_steps, max_steps_for_text);
+use_kv = false;
+if isfield(cfg, 'use_kv_cache') && cfg.use_kv_cache
+    use_kv = true;
+end
 
 dec_kv_net = [];
-if isfield(models, 'decoder_with_past') && ~isempty(models.decoder_with_past)
-    dec_kv_net = models.decoder_with_past;
-elseif isfield(models, 'decoder_kv') && ~isempty(models.decoder_kv)
-    dec_kv_net = models.decoder_kv;
+if use_kv
+    if isfield(models, 'decoder_with_past') && ~isempty(models.decoder_with_past)
+        dec_kv_net = models.decoder_with_past;
+    elseif isfield(models, 'decoder_kv') && ~isempty(models.decoder_kv)
+        dec_kv_net = models.decoder_kv;
+    end
 end
-has_kv_model = ~isempty(dec_kv_net);
 
-consecutive_stop_required = 1;
+consecutive_stop_required = 2;
 consecutive_stop_count = 0;
 
 for step = 1:max_steps_for_text
-    use_past = (step > 1) && has_kv_model && ~isempty(fieldnames(kv_cache));
+    use_past_step = use_kv && (step > 1) && ~isempty(dec_kv_net) && ~isempty(fieldnames(kv_cache));
 
-    if use_past
+    if use_past_step
         current_net = dec_kv_net;
     else
         current_net = models.decoder;
@@ -129,9 +133,9 @@ for step = 1:max_steps_for_text
     % Format decoder inputs
     try
         dec_inputs = tensor_contract_utils.format_decoder_inputs( ...
-            output_sequence, enc_hidden, enc_attn_mask, spk_vec, kv_cache, current_net, use_past);
+            output_sequence, enc_hidden, enc_attn_mask, spk_vec, kv_cache, current_net, use_past_step);
         [dec_raw_out, current_net] = tensor_contract_utils.predict_net(current_net, dec_inputs);
-        if use_past
+        if use_past_step
             dec_kv_net = current_net;
         else
             models.decoder = current_net;
@@ -139,80 +143,79 @@ for step = 1:max_steps_for_text
     catch ME
         error("synthesize_features:DecoderStepFailed", ...
             "SpeechT5 decoder failed at autoregressive step %d (usePast=%s, rf=%d):\nError: %s\nCheck models/speecht5 ONNX contract via scripts/diagnose_onnx.m.", ...
-            step, string(use_past), rf, ME.message);
+            step, string(use_past_step), rf, ME.message);
     end
 
-    % Parse outputs: pre-postnet spectrum [rf x 80], postnet spectrum [rf x 80],
-    % calibrated stop probabilities [1 x rf], new KV cache
+    % Parse outputs: pre-postnet spectrum, postnet spectrum, stop probabilities
     [spectrum_frames, stop_probs, ~, kv_cache, postnet_spectrum_frames] = ...
         tensor_contract_utils.parse_decoder_outputs(dec_raw_out, current_net, rf, kv_cache);
 
     % Verify numerical finiteness
     if ~all(isfinite(spectrum_frames), 'all')
-        warning("synthesize_features:NonFiniteDecoderFrame", ...
-            "Decoder produced non-finite values at step %d. Clamping to zero.", step);
         spectrum_frames(~isfinite(spectrum_frames)) = 0;
     end
     if ~all(isfinite(postnet_spectrum_frames), 'all')
         postnet_spectrum_frames(~isfinite(postnet_spectrum_frames)) = 0;
     end
 
-    n_frames_step = size(spectrum_frames, 1);
-    stop_triggered = false;
+    % Accumulate postnet frames
+    if size(postnet_spectrum_frames, 1) >= step * rf
+        % Full-sequence Postnet output: model emitted complete refined sequence
+        current_full_mel = postnet_spectrum_frames;
+    else
+        % Step-slice Postnet output: accumulate latest rf frames
+        step_frames = postnet_spectrum_frames(max(1, end-rf+1):end, :);
+        accumulated_postnet_frames = [accumulated_postnet_frames; step_frames]; %#ok<AGROW>
+        current_full_mel = accumulated_postnet_frames;
+    end
 
-    % Append frames and evaluate stop condition per frame
-    for f = 1:n_frames_step
-        % Accumulate postnet frames for final output to HiFi-GAN
-        postnet_frame = postnet_spectrum_frames(f, :);
-        postnet_frames = [postnet_frames; postnet_frame]; %#ok<AGROW>
-
-        % Accumulate pre-postnet frames (for autoregressive feedback)
-        prepostnet_frame = spectrum_frames(f, :);
-        prepostnet_frames = [prepostnet_frames; prepostnet_frame]; %#ok<AGROW>
-
-        % Stop condition: only evaluated after min_steps
-        if step >= min_steps && numel(stop_probs) >= f
-            prob_f = stop_probs(f);
-            if prob_f > cfg.stop_threshold || prob_f > 0.5
-                consecutive_stop_count = consecutive_stop_count + 1;
-                if consecutive_stop_count >= consecutive_stop_required
-                    stop_triggered = true;
-                    break;
-                end
-            else
-                consecutive_stop_count = 0;
+    % Stop condition evaluation: only after min_steps, requiring 2 consecutive triggers
+    if step >= min_steps
+        max_prob = max(stop_probs);
+        if max_prob > cfg.stop_threshold
+            consecutive_stop_count = consecutive_stop_count + 1;
+            if consecutive_stop_count >= consecutive_stop_required
+                fprintf("[synthesize_features] Stop token triggered at step %d (%d frames, %.2f s)\n", ...
+                    step, size(current_full_mel, 1), size(current_full_mel, 1) * 256 / cfg.fs);
+                break;
             end
+        else
+            consecutive_stop_count = 0;
         end
     end
 
-    if stop_triggered
-        fprintf("[synthesize_features] Natural stop token triggered at step %d (%d frames, %.2f s)\n", ...
-            step, size(postnet_frames, 1), size(postnet_frames, 1) * 256 / cfg.fs);
-        break;
-    end
-
-    % Stagnation / energy collapse guard (check last 5 frames after 20 frames)
-    if size(postnet_frames, 1) >= 20
-        recent_energy = mean(abs(postnet_frames(end-4:end, :)), 'all');
+    % Stagnation / energy collapse guard
+    if size(current_full_mel, 1) >= 30
+        recent_energy = mean(abs(current_full_mel(end-4:end, :)), 'all');
         if recent_energy < 1e-7
             fprintf("[synthesize_features] Energy collapse detected at step %d — stopping.\n", step);
             break;
         end
     end
 
-    % Prepare next output_sequence: last predicted PRE-POSTNET Mel frame [1, 1, 80]
-    output_sequence = reshape(single(spectrum_frames(end, :)), 1, 1, cfg.n_mels);
+    % Prepare next output_sequence:
+    % Extract the last pre-postnet Mel frame [1, 1, 80]
+    last_mel_frame = reshape(single(spectrum_frames(end, :)), 1, 1, cfg.n_mels);
+
+    if use_kv
+        % When using KV cache, pass only the single newest frame
+        output_sequence = last_mel_frame;
+    else
+        % Full-prefix mode: append newest frame to growing sequence [1, step+1, 80]
+        % This guarantees exact prenet sinusoidal positional embeddings across the entire sentence!
+        output_sequence = cat(2, output_sequence, last_mel_frame);
+    end
 end
 
 timings.decoderTime_s = toc(t_dec);
 
-if isempty(postnet_frames)
+if isempty(current_full_mel)
     error("synthesize_features:EmptyAcousticFeatures", ...
         "SpeechT5 decoder finished without producing acoustic frames.");
 end
 
 % Return standard [n_mels x T_mel] matrix using POSTNET frames
-acoustic = single(postnet_frames');
+acoustic = single(current_full_mel');
 
 fprintf("[synthesize_features] Generated %d Mel frames (%d decoder steps, %.2f s audio at 16 kHz)\n", ...
     size(acoustic, 2), step, size(acoustic, 2) * 256 / 16000);
