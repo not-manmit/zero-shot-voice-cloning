@@ -27,6 +27,7 @@ arguments
     models struct = struct()
     cfg struct = struct()
     options.enable_denoise logical = false
+    options.enable_pitch_match logical = false
 end
 
 if isempty(cfg) || ~isfield(cfg, 'fs')
@@ -68,6 +69,12 @@ end
 
 % --- 3. Synthesize Voice from Embedding ---------------------------------
 result = generate_voice_from_embedding(speakerEmbedding, targetText, models, cfg, precomputedMetrics);
+
+% Optional DSP Pitch & Acoustics Matching
+if options.enable_pitch_match && isfield(dspInfo, 'f0_median') && dspInfo.f0_median > 0
+    [result.waveform, shift_applied] = match_speaker_acoustics(result.waveform, dspInfo.f0_median, cfg.fs);
+    result.metadata.pitchShiftApplied = shift_applied;
+end
 
 % Attach reference metadata
 result.metadata.referenceSampleRate = refFs;
