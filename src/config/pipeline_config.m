@@ -40,6 +40,7 @@ cfg.max_decoder_steps = 500; % autoregressive limit (aligns with SpeechT5 max me
 cfg.eos_mel_threshold = 0.5; % stop logit threshold if model emits it
 
 cfg.spk_emb_dim = 512;      % SpeechT5 expects 512; CAM++ export also outputs 512
+cfg.skip_campp_onnx_import = true; % Bypasses 402s CAM++ ONNX import hang (AveragePool ceil_mode=1)
 cfg.spk_min_dur_s = 1.0;
 cfg.spk_chunk_dur_s = 3.0;  % CAM++/Wespeaker uses 3 s chunks with 50% overlap
 cfg.spk_sample_rate = 16000;
