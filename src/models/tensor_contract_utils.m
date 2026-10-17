@@ -12,6 +12,7 @@ classdef tensor_contract_utils
 %     Decoder Mask in  [1, T]            [1, T]               'UU'
 %     Decoder KV in    [1, 12, seq, 64]  [1, 12, seq, 64]     'UUUU'
 %     Decoder Mel out  [rf, 80]          spectrumOutput       Matrix [rf, 80]
+%     Decoder Post out [1, rf, 80]       output_sequence_out  Matrix [rf, 80] (Postnet-refined)
 %     Decoder Stop out [1, rf]           probOutput           Row [1, rf]
 %     Vocoder Mel in   [T_mel, 80]       [T_mel, 80]          'UU'
 %     Vocoder Wave out [1, 1, N]         waveformOutput       Vector [N, 1]
@@ -218,14 +219,28 @@ classdef tensor_contract_utils
             end
         end
 
-        function [spectrum, prob_val, raw_logit, kv_cache] = parse_decoder_outputs(raw_out, net, rf, kv_cache)
-            %PARSE_DECODER_OUTPUTS Extract spectrumOutput, probOutput, and update KV cache.
+        function [spectrum, prob_val, raw_logit, kv_cache, postnet_spectrum] = parse_decoder_outputs(raw_out, net, rf, kv_cache)
+            %PARSE_DECODER_OUTPUTS Extract spectrumOutput, output_sequence_out (postnet), probOutput, and update KV cache.
+            %
+            %   In Xenova/speecht5_tts decoder ONNX models, there are THREE primary output heads:
+            %     1. output_sequence_out (or output_sequence_...): Postnet-refined Mel [1, rf, 80] or [rf, 80]
+            %     2. spectrumOutput: Pre-postnet raw decoder Mel frames [rf, 80]
+            %     3. probOutput: Stop-token logits [1, rf] or [rf]
+            %
+            %   The POSTNET output (output_sequence_out) is the one that should be used for
+            %   the final accumulated Mel spectrogram sent to HiFi-GAN, because SpeechT5's
+            %   5-layer Conv1D Postnet adds residual harmonic refinement.
+            %
+            %   The PRE-POSTNET output (spectrumOutput) is used as the autoregressive feedback
+            %   for the next decoder step (output_sequence input).
+
             if nargin < 4
                 kv_cache = struct();
             end
 
             out_names = cellstr(net.OutputNames);
             spectrum_raw = [];
+            postnet_raw = [];
             prob_raw = [];
 
             if iscell(raw_out)
@@ -234,10 +249,20 @@ classdef tensor_contract_utils
                         continue;
                     end
                     nm = out_names{k};
+                    nm_lower = lower(nm);
 
-                    if strcmp(nm, "spectrumOutput") || (contains(nm, "spectrum", "IgnoreCase", true) && isempty(spectrum_raw))
+                    % Identify the postnet output: output_sequence_out or output_sequence_...
+                    if contains(nm_lower, "output_sequence") && isempty(postnet_raw)
+                        postnet_raw = extractdata(raw_out{k});
+
+                    % Identify the pre-postnet output: spectrumOutput
+                    elseif (strcmp(nm, "spectrumOutput") || ...
+                            (contains(nm_lower, "spectrum") && isempty(spectrum_raw)))
                         spectrum_raw = extractdata(raw_out{k});
-                    elseif strcmp(nm, "probOutput") || (contains(nm, "prob", "IgnoreCase", true) && isempty(prob_raw))
+
+                    % Identify the stop probability output: probOutput
+                    elseif strcmp(nm, "probOutput") || ...
+                            (contains(nm_lower, "prob") && isempty(prob_raw))
                         prob_raw = extractdata(raw_out{k});
                     end
                 end
@@ -259,15 +284,34 @@ classdef tensor_contract_utils
                 end
             end
 
-            % Normalize spectrum to [rf, 80]
+            % Normalize pre-postnet spectrum to [rf, 80]
             spectrum = tensor_contract_utils.normalize_spectrum(spectrum_raw, rf);
+
+            % Normalize postnet spectrum to [rf, 80] (if available)
+            if ~isempty(postnet_raw)
+                postnet_spectrum = tensor_contract_utils.normalize_spectrum(postnet_raw, rf);
+            else
+                % Fall back to pre-postnet if postnet output is not available
+                postnet_spectrum = spectrum;
+            end
 
             % Normalize stop probability
             [prob_val, raw_logit] = tensor_contract_utils.normalize_probability(prob_raw, rf);
         end
 
         function s = normalize_spectrum(raw, rf)
-            %NORMALIZE_SPECTRUM Standardize predicted Mel to [rf, 80] frames
+            %NORMALIZE_SPECTRUM Standardize predicted Mel to [rf, 80] frames.
+            %
+            %   Handles all dimension orderings that MATLAB's dlarray/ONNX import
+            %   may produce:
+            %     - [1, rf, 80]  -> squeeze -> [rf, 80]
+            %     - [rf, 80]     -> keep as-is
+            %     - [80, rf]     -> transpose to [rf, 80]
+            %     - [1, 80, rf]  -> permute and squeeze
+            %
+            %   CRITICAL: Never blindly reshape when the first dimension is 80,
+            %   because MATLAB's column-major reshape would scramble frequency
+            %   bins with time frames.
             if isempty(raw)
                 s = single(zeros(0, 80));
                 return;
@@ -275,27 +319,45 @@ classdef tensor_contract_utils
             raw = single(raw);
             sz = size(raw);
 
+            % Handle 3D tensors: squeeze out batch dimension first
             if ndims(raw) == 3
-                if sz(3) == 80
-                    s = reshape(raw, [], 80);
-                elseif sz(2) == 80
-                    s = permute(raw, [1, 3, 2]);
-                    s = reshape(s, [], 80);
-                else
-                    s = reshape(raw, [], 80);
+                % Squeeze singleton dimensions
+                raw = squeeze(raw);
+                sz = size(raw);
+                % After squeeze, should be 2D
+                if ndims(raw) == 3
+                    % Still 3D after squeeze (no singleton dims) — try common layouts
+                    if sz(3) == 80
+                        % [batch, rf, 80] -> reshape to [batch*rf, 80]
+                        s = reshape(raw, [], 80);
+                    elseif sz(2) == 80
+                        % [batch, 80, rf] -> permute to [batch, rf, 80]
+                        raw_p = permute(raw, [1, 3, 2]);
+                        s = reshape(raw_p, [], 80);
+                    else
+                        s = reshape(raw, [], 80);
+                    end
+                    return;
                 end
-            elseif ndims(raw) == 2
+            end
+
+            % Handle 2D tensors
+            if ndims(raw) == 2
                 if sz(2) == 80
+                    % Already [rf, 80] — correct orientation
                     s = raw;
-                elseif sz(1) == 80
+                elseif sz(1) == 80 && sz(2) ~= 80
+                    % [80, rf] — transpose to [rf, 80]
                     s = raw';
                 else
+                    % Unknown layout — reshape as last resort
                     s = reshape(raw, [], 80);
                 end
             else
                 s = reshape(raw, [], 80);
             end
 
+            % Final safety check
             if size(s, 2) ~= 80 && size(s, 1) == 80
                 s = s';
             end
@@ -353,7 +415,7 @@ classdef tensor_contract_utils
             in_name = in_names{1};
 
             mel = single(mel80);
-            if size(mel, 1) == 80
+            if size(mel, 1) == 80 && size(mel, 2) ~= 80
                 % [80, T_mel] -> transpose to raw ONNX order [T_mel, 80]
                 mel = mel';
             end
