@@ -299,67 +299,44 @@ classdef tensor_contract_utils
             [prob_val, raw_logit] = tensor_contract_utils.normalize_probability(prob_raw, rf);
         end
 
-        function s = normalize_spectrum(raw, rf)
-            %NORMALIZE_SPECTRUM Standardize predicted Mel to [rf, 80] frames.
-            %
-            %   Handles all dimension orderings that MATLAB's dlarray/ONNX import
-            %   may produce:
-            %     - [1, rf, 80]  -> squeeze -> [rf, 80]
-            %     - [rf, 80]     -> keep as-is
-            %     - [80, rf]     -> transpose to [rf, 80]
-            %     - [1, 80, rf]  -> permute and squeeze
-            %
-            %   CRITICAL: Never blindly reshape when the first dimension is 80,
-            %   because MATLAB's column-major reshape would scramble frequency
-            %   bins with time frames.
+        function s = normalize_spectrum(raw, ~)
+            %NORMALIZE_SPECTRUM Standardize predicted Mel to [T_frames, 80] layout.
             if isempty(raw)
                 s = single(zeros(0, 80));
                 return;
             end
             raw = single(raw);
-            sz = size(raw);
 
-            % Handle 3D tensors: squeeze out batch dimension first
+            % 1. Remove singleton dimensions safely preserving memory order of remaining dims
             if ndims(raw) == 3
-                % Squeeze singleton dimensions
-                raw = squeeze(raw);
-                sz = size(raw);
-                % After squeeze, should be 2D
-                if ndims(raw) == 3
-                    % Still 3D after squeeze (no singleton dims) — try common layouts
-                    if sz(3) == 80
-                        % [batch, rf, 80] -> reshape to [batch*rf, 80]
-                        s = reshape(raw, [], 80);
-                    elseif sz(2) == 80
-                        % [batch, 80, rf] -> permute to [batch, rf, 80]
-                        raw_p = permute(raw, [1, 3, 2]);
-                        s = reshape(raw_p, [], 80);
-                    else
-                        s = reshape(raw, [], 80);
-                    end
-                    return;
+                if size(raw, 1) == 1
+                    raw = reshape(raw, size(raw, 2), size(raw, 3));
+                elseif size(raw, 3) == 1
+                    raw = raw(:, :, 1);
+                elseif size(raw, 2) == 1
+                    raw = squeeze(raw);
                 end
             end
 
-            % Handle 2D tensors
+            % 2. Standardize 2D layout to [T_frames, 80]
             if ndims(raw) == 2
+                sz = size(raw);
                 if sz(2) == 80
-                    % Already [rf, 80] — correct orientation
+                    % Already [T_frames, 80]
                     s = raw;
-                elseif sz(1) == 80 && sz(2) ~= 80
-                    % [80, rf] — transpose to [rf, 80]
-                    s = raw';
+                elseif sz(1) == 80
+                    % [80, T_frames] -> transpose to [T_frames, 80]
+                    s = raw.';
                 else
-                    % Unknown layout — reshape as last resort
-                    s = reshape(raw, [], 80);
+                    s = raw;
                 end
             else
-                s = reshape(raw, [], 80);
+                s = raw;
             end
 
             % Final safety check
             if size(s, 2) ~= 80 && size(s, 1) == 80
-                s = s';
+                s = s.';
             end
         end
 
