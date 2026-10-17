@@ -1,11 +1,11 @@
 function results = download_weights(force)
-%DOWNLOAD_WEIGHTS Download canonical SpeechT5, CAM++, and HiFi-GAN ONNX models.
+%DOWNLOAD_WEIGHTS Download canonical SpeechT5, CAM++, HiFi-GAN ONNX models AND CMU Arctic x-vectors.
 %
 %   results = DOWNLOAD_WEIGHTS()
 %   results = DOWNLOAD_WEIGHTS(force)
 %
-%   Downloads the 5 verified ONNX model files to the canonical locations
-%   defined in pipeline_config().
+%   Downloads the 5 verified ONNX model files + 7 CMU Arctic x-vector anchor
+%   embeddings to the canonical locations defined in pipeline_config().
 %
 %   Features:
 %     - Real URLs from authoritative Hugging Face repositories (Xenova & openspeech)
@@ -14,6 +14,7 @@ function results = download_weights(force)
 %     - Integrity verification (file exists, size threshold, .onnx extension)
 %     - SHA-256 checksum computation via native Java MessageDigest
 %     - Dynamic total size reporting (actual ~875.7 MB)
+%     - CMU Arctic x-vector .bin downloads (512 float32 = 2048 bytes each!)
 %     - Structured failure reporting with granular error diagnostics
 %
 %   Outputs:
@@ -139,6 +140,74 @@ for i = 1:numel(assets)
     results(end+1) = r; %#ok<AGROW>
 end
 
+% --- Download CMU Arctic X-Vector Anchors (.bin files) ---
+fprintf("\n================================================================\n");
+fprintf("[download_weights] Downloading CMU Arctic X-Vector Anchors ...\n");
+fprintf("  Source: Xenova/cmu-arctic-xvectors-extracted (HuggingFace)\n");
+fprintf("  Each file is 2048 bytes (512 float32 values)\n");
+fprintf("================================================================\n");
+
+xvec_dir = cfg.paths.xvector_root;
+if ~isfolder(xvec_dir)
+    mkdir(xvec_dir);
+end
+
+% CMU Arctic speaker IDs to download
+xvec_speakers = {'bdl', 'rms', 'slt', 'clb', 'ksp', 'awb', 'jmk'};
+xvec_base_url = 'https://huggingface.co/datasets/Xenova/cmu-arctic-xvectors-extracted/resolve/main/';
+
+xvec_webOpts = weboptions('Timeout', 30, 'CertificateFilename', '');
+xvec_success = 0;
+xvec_failed = 0;
+
+for j = 1:numel(xvec_speakers)
+    spk = xvec_speakers{j};
+    bin_path = fullfile(xvec_dir, [spk '.bin']);
+    bin_url = [xvec_base_url spk '.bin'];
+
+    fprintf("\n  [X-Vector %d/%d] %s\n", j, numel(xvec_speakers), spk);
+    fprintf("    URL:  %s\n", bin_url);
+    fprintf("    Path: %s\n", bin_path);
+
+    % Check if already downloaded
+    if isfile(bin_path) && ~force
+        fInfo = dir(bin_path);
+        if fInfo.bytes >= 2048
+            fprintf("    Status: Already present (%d bytes) — skipping.\n", fInfo.bytes);
+            xvec_success = xvec_success + 1;
+            continue;
+        end
+    end
+
+    try
+        websave(bin_path, bin_url, xvec_webOpts);
+        if isfile(bin_path)
+            fInfo = dir(bin_path);
+            if fInfo.bytes >= 2048
+                fprintf("    Downloaded OK (%d bytes)\n", fInfo.bytes);
+                xvec_success = xvec_success + 1;
+            else
+                fprintf("    WARNING: File too small (%d bytes, expected 2048)\n", fInfo.bytes);
+                xvec_failed = xvec_failed + 1;
+            end
+        else
+            fprintf("    FAILED: File not created\n");
+            xvec_failed = xvec_failed + 1;
+        end
+    catch ME
+        fprintf("    FAILED: %s\n", ME.message);
+        fprintf("    (Non-critical: hardcoded fallback x-vectors will be used)\n");
+        xvec_failed = xvec_failed + 1;
+    end
+end
+
+fprintf("\n  X-Vector Summary: %d/%d downloaded, %d failed\n", ...
+    xvec_success, numel(xvec_speakers), xvec_failed);
+if xvec_failed > 0
+    fprintf("  Note: Hardcoded fallback x-vectors will be used for missing speakers.\n");
+    fprintf("  The system will still produce valid speech; download is for optimal quality.\n");
+end
+
 % Summary report
 nSuccess = sum(strcmp({results.status}, 'DOWNLOADED_SUCCESS'));
 nSkipped = sum(strcmp({results.status}, 'SKIPPED_ALREADY_EXISTS'));
@@ -147,11 +216,12 @@ totalActualMB = sum([results.sizeMB]);
 
 fprintf("\n=================================================================\n");
 fprintf("[download_weights] SUMMARY REPORT\n");
-fprintf("  Total assets checked:  %d\n", numel(assets));
-fprintf("  Successfully fetched:  %d\n", nSuccess);
-fprintf("  Previously verified:   %d\n", nSkipped);
-fprintf("  Failed downloads:      %d\n", nFailed);
-fprintf("  Total model data size: %.1f MB\n", totalActualMB);
+fprintf("  Total ONNX assets checked:  %d\n", numel(assets));
+fprintf("  Successfully fetched:       %d\n", nSuccess);
+fprintf("  Previously verified:        %d\n", nSkipped);
+fprintf("  Failed downloads:           %d\n", nFailed);
+fprintf("  Total model data size:      %.1f MB\n", totalActualMB);
+fprintf("  X-Vector anchors:           %d/%d OK\n", xvec_success, numel(xvec_speakers));
 fprintf("=================================================================\n");
 
 if nFailed > 0
