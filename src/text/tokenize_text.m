@@ -38,7 +38,7 @@ function [input_ids, attention_mask] = tokenize_text(text, cfg)
 %   ID 15  l          ID 55 F   ID 75 }
 %   ID 16  u          ID 56 Y   ID 76 ê (U+00EA)
 %   ID 17  c          ID 57 z   ID 77 œ (U+0153)
-%   ID 18  m          ID 58 J   ID 78 ̄ (U+0304)
+%   ID 18  m          ID 58 J   ID 78 ̄  (U+0304)
 %   ID 19  f          ID 59 :   ID 79 <mask>
 %   ID 20  w          ...           ID 80 <ctc_blank>
 %   ID 21  g
@@ -71,8 +71,59 @@ end
 % --- Vocabulary (81 entries, 0-indexed, verified) --------------------
 % Order = token ID. Exact order from Xenova/speecht5_tts tokenizer.json:model.vocab
 % Use string array; id = index-1
-VOCAB_LIST = ["<s>","<pad>","</s>","<unk>","▁","e","t","a","o","n","i","h","s","r","d","l","u","c","m","f","w","g","y",",","p","b",".","v","k",'"',"I","'","T","A","S","H",";","x","W","-","B","?","C","M","!","q","j","E","N","P","O","D","L","G","R","F","Y","z","J",":","K","U","V",")","(","Q","Z","]","[","X","—","/","æ","é","{","}","ê","œ","̄","<mask>","<ctc_blank>"];
+% CRITICAL: All non-ASCII characters are defined using explicit Unicode
+% code points via char(hex2dec(...)) to prevent file encoding corruption.
+%
+% Exact 81-token vocabulary (IDs 0-80):
+%   0  <s>           20 w            40 B            60 K
+%   1  <pad>         21 g            41 ?            61 U
+%   2  </s>          22 y            42 C            62 V
+%   3  <unk>         23 ,            43 M            63 )
+%   4  ▁ (U+2581)    24 p            44 !            64 (
+%   5  e             25 b            45 q            65 Q
+%   6  t             26 .            46 j            66 Z
+%   7  a             27 v            47 E            67 ]
+%   8  o             28 k            48 N            68 [
+%   9  n             29 "            49 P            69 X
+%  10  i             30 I            50 O            70 — (U+2014)
+%  11  h             31 '            51 D            71 /
+%  12  s             32 T            52 L            72 æ (U+00E6)
+%  13  r             33 A            53 G            73 é (U+00E9)
+%  14  d             34 S            54 R            74 {
+%  15  l             35 H            55 F            75 }
+%  16  u             36 ;            56 Y            76 ê (U+00EA)
+%  17  c             37 x            57 z            77 œ (U+0153)
+%  18  m             38 W            58 J            78 ̄  (U+0304)
+%  19  f             39 -            59 :            79 <mask>
+%                                                    80 <ctc_blank>
+
+VOCAB_LIST = [ ...
+    "<s>", "<pad>", "</s>", "<unk>", ...              % IDs 0-3
+    string(char(hex2dec('2581'))), ...                 % ID 4: ▁ (metaspace U+2581)
+    "e","t","a","o","n","i","h","s","r","d", ...       % IDs 5-14
+    "l","u","c","m","f","w","g","y",",","p", ...       % IDs 15-24
+    "b",".","v","k",'"',"I","'","T","A","S", ...       % IDs 25-34
+    "H",";","x","W","-","B","?","C","M","!", ...       % IDs 35-44
+    "q","j","E","N","P","O","D","L","G","R", ...       % IDs 45-54
+    "F","Y","z","J",":", ...                           % IDs 55-59
+    "K","U","V",")","(","Q","Z","]","[","X", ...       % IDs 60-69
+    string(char(hex2dec('2014'))), ...                 % ID 70: — (em dash U+2014)
+    "/", ...                                          % ID 71
+    string(char(hex2dec('00E6'))), ...                 % ID 72: æ (U+00E6)
+    string(char(hex2dec('00E9'))), ...                 % ID 73: é (U+00E9)
+    "{","}", ...                                      % IDs 74-75
+    string(char(hex2dec('00EA'))), ...                 % ID 76: ê (U+00EA)
+    string(char(hex2dec('0153'))), ...                 % ID 77: œ (U+0153)
+    string(char(hex2dec('0304'))), ...                 % ID 78: combining macron (U+0304)
+    "<mask>","<ctc_blank>" ...                         % IDs 79-80
+    ];
 VOCAB = VOCAB_LIST(:); % 81x1
+
+% Assertion: vocabulary must have exactly 81 entries
+assert(numel(VOCAB) == 81, ...
+    'tokenize_text:VocabSizeMismatch', ...
+    'VOCAB_LIST has %d entries but must have exactly 81 (IDs 0-80). Check for missing or duplicated tokens.', ...
+    numel(VOCAB));
 
 % Build fast lookup map string->id (0-indexed)
 persistent VOCAB_MAP
@@ -104,7 +155,9 @@ words = words(strlength(words)>0);
 
 % Build token sequence: for each word, prepend ▁ (U+2581) then per-char (case preserved)
 char_ids = int64.empty(1,0);
-meta = "▁"; % U+2581 metaspace
+% U+2581 metaspace — defined via explicit Unicode code point to prevent
+% file encoding corruption (never depend on literal non-ASCII in .m source)
+meta = string(char(hex2dec('2581')));
 for w = 1:numel(words)
     word = words(w);
     % First token for word is metaspace ▁
