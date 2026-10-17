@@ -62,17 +62,26 @@ anchors.gender = string(speaker_meta(:, 3))';
 anchors.vectors = zeros(n_speakers, 512, 'single');
 anchors.loaded_from = "hardcoded";
 
-% Try loading from binary .bin files first
+% Try loading from binary .bin files first (checking short and long names)
 all_loaded = true;
 for i = 1:n_speakers
     spk_name = speaker_meta{i, 1};
     bin_path = fullfile(xvec_dir, [spk_name '.bin']);
+    if ~isfile(bin_path)
+        bin_path = fullfile(xvec_dir, sprintf('cmu_us_%s_arctic-wav-arctic_a0001.bin', spk_name));
+    end
+
     if isfile(bin_path)
-        fid = fopen(bin_path, 'rb', 'l');  % little-endian
+        fid = fopen(bin_path, 'rb', 'l');  % little-endian float32
         if fid ~= -1
-            vec = fread(fid, 512, 'single');
+            vec = fread(fid, 512, 'float32=>single');
             fclose(fid);
-            if numel(vec) == 512
+            if numel(vec) == 512 && all(isfinite(vec))
+                v_norm = norm(double(vec));
+                % SpeechT5 expects unit L2-norm (norm ~ 1.0)
+                if v_norm > eps
+                    vec = vec / v_norm;
+                end
                 anchors.vectors(i, :) = single(vec(:)');
                 continue;
             end
@@ -151,8 +160,8 @@ raw = randn(1, 512, 'single') * 0.15;
 kernel = single([0.1, 0.2, 0.4, 0.2, 0.1]);
 smoothed = conv(raw, kernel, 'same');
 
-% Scale to match real L2 norm range (typically 7.5-8.5 for raw SpeechBrain output)
-target_norm = 7.8;
+% Scale to match real SpeechT5 unit L2 norm (norm == 1.0)
+target_norm = 1.0;
 vec = single(smoothed * (target_norm / max(eps, norm(double(smoothed)))));
 
 rng(rng_state);  % restore rng state

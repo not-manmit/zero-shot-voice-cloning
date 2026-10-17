@@ -19,6 +19,11 @@ fprintf("=======================================================================
 fprintf("       SPEECH QUALITY & ACOUSTIC CONTRACT VERIFICATION DIAGNOSTIC              \n");
 fprintf("================================================================================\n");
 
+% Ensure src and scripts are on MATLAB path
+projRoot = fileparts(fileparts(mfilename('fullpath')));
+addpath(genpath(fullfile(projRoot, 'src')));
+addpath(fullfile(projRoot, 'scripts')));
+
 report = struct();
 cfg = pipeline_config();
 
@@ -27,7 +32,7 @@ cfg = pipeline_config();
 % -------------------------------------------------------------------------
 fprintf("\n--- Step 1: SentencePiece Tokenizer Verification ---\n");
 test_text = "Hello, this is a zero-shot voice cloning demonstration in MATLAB.";
-fprintf("Target Text: \"%s\"\n", test_text);
+fprintf('Target Text: "%s"\n', test_text);
 
 try
     [ids, mask] = tokenize_text(test_text, cfg);

@@ -95,24 +95,16 @@ postnet_frames = [];    % Accumulated POSTNET Mel frames for final output -> HiF
 prepostnet_frames = []; % Accumulated pre-postnet frames (for diagnostics / fallback)
 kv_cache = struct();
 
-% Step calculation
-max_steps = min(cfg.max_decoder_steps, max(30, round(cfg.max_len_ratio * T_tokens / rf)));
+% Sentence length estimation and step bounds
+L_chars = max(1, double(strlength(strtrim(target_text))));
+expected_mel_frames = round(L_chars * 3.5);
 
-% CRITICAL FIX: Use min_len_ratio = 3.0 if config has 0.0 (prevents premature
-% stop-token truncation that caused 1.10s / 69 frames of gibberish).
-% For English TTS: ~3.5-5.0 Mel frames per text token, so min_len_ratio = 3.0
-% means min_steps = ceil(3.0 * T_tokens / rf) decoder steps before stop is allowed.
-effective_min_len_ratio = cfg.min_len_ratio;
-if effective_min_len_ratio < 1.0
-    effective_min_len_ratio = 3.0;
-    fprintf("[synthesize_features] Overriding min_len_ratio from %.1f to %.1f (prevents premature stop truncation)\n", ...
-        cfg.min_len_ratio, effective_min_len_ratio);
-end
-min_steps = max(1, round(effective_min_len_ratio * T_tokens / rf));
+% Minimum steps before stop token is allowed, and hard maximum steps for this sentence
+min_steps = max(10, round(0.5 * expected_mel_frames / rf));
+max_steps_for_text = min(cfg.max_decoder_steps, max(min_steps + 10, round(1.5 * expected_mel_frames / rf)));
 
-% Require consecutive stop frames to prevent spurious single-frame stop triggers
-consecutive_stop_required = 2;
-consecutive_stop_count = 0;
+fprintf("[synthesize_features] Target text (%d chars): expected ~%d frames (~%.2f s). Step bounds: min=%d, max=%d\n", ...
+    L_chars, expected_mel_frames, expected_mel_frames * 256 / cfg.fs, min_steps, max_steps_for_text);
 
 dec_kv_net = [];
 if isfield(models, 'decoder_with_past') && ~isempty(models.decoder_with_past)
@@ -122,7 +114,10 @@ elseif isfield(models, 'decoder_kv') && ~isempty(models.decoder_kv)
 end
 has_kv_model = ~isempty(dec_kv_net);
 
-for step = 1:max_steps
+consecutive_stop_required = 1;
+consecutive_stop_count = 0;
+
+for step = 1:max_steps_for_text
     use_past = (step > 1) && has_kv_model && ~isempty(fieldnames(kv_cache));
 
     if use_past
@@ -167,20 +162,18 @@ for step = 1:max_steps
 
     % Append frames and evaluate stop condition per frame
     for f = 1:n_frames_step
-        % Accumulate postnet frames for final output
+        % Accumulate postnet frames for final output to HiFi-GAN
         postnet_frame = postnet_spectrum_frames(f, :);
         postnet_frames = [postnet_frames; postnet_frame]; %#ok<AGROW>
 
-        % Accumulate pre-postnet frames (for autoregressive feedback and diagnostics)
+        % Accumulate pre-postnet frames (for autoregressive feedback)
         prepostnet_frame = spectrum_frames(f, :);
         prepostnet_frames = [prepostnet_frames; prepostnet_frame]; %#ok<AGROW>
 
-        curr_total_frames = size(postnet_frames, 1);
-
-        % Stop condition: only after minimum steps, and require consecutive stop frames
-        if curr_total_frames > (min_steps * rf) && numel(stop_probs) >= f
+        % Stop condition: only evaluated after min_steps
+        if step >= min_steps && numel(stop_probs) >= f
             prob_f = stop_probs(f);
-            if prob_f > cfg.stop_threshold
+            if prob_f > cfg.stop_threshold || prob_f > 0.5
                 consecutive_stop_count = consecutive_stop_count + 1;
                 if consecutive_stop_count >= consecutive_stop_required
                     stop_triggered = true;
@@ -193,23 +186,22 @@ for step = 1:max_steps
     end
 
     if stop_triggered
+        fprintf("[synthesize_features] Natural stop token triggered at step %d (%d frames, %.2f s)\n", ...
+            step, size(postnet_frames, 1), size(postnet_frames, 1) * 256 / cfg.fs);
         break;
     end
 
-    % Stagnation / energy collapse guard (check last 5 frames after 15 frames)
-    if size(postnet_frames, 1) >= 15
+    % Stagnation / energy collapse guard (check last 5 frames after 20 frames)
+    if size(postnet_frames, 1) >= 20
         recent_energy = mean(abs(postnet_frames(end-4:end, :)), 'all');
         if recent_energy < 1e-7
+            fprintf("[synthesize_features] Energy collapse detected at step %d — stopping.\n", step);
             break;
         end
     end
 
     % Prepare next output_sequence: last predicted PRE-POSTNET Mel frame [1, 1, 80]
-    % CRITICAL: The autoregressive decoder feedback MUST use the pre-postnet spectrum
-    % (spectrumOutput), NOT the postnet output. The decoder prenet expects raw decoder
-    % output for correct positional encoding and attention alignment.
-    last_frame = prepostnet_frames(end, :);
-    output_sequence = reshape(single(last_frame), 1, 1, cfg.n_mels);
+    output_sequence = reshape(single(spectrum_frames(end, :)), 1, 1, cfg.n_mels);
 end
 
 timings.decoderTime_s = toc(t_dec);

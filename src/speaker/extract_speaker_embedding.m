@@ -130,7 +130,7 @@ if ~campp_succeeded
     spk_emb = derive_xvector_from_dsp(x, fs, cfg);
 end
 
-% 5. Validation
+% 5. Validation and Canonical Formatting
 if numel(spk_emb) ~= cfg.spk_emb_dim
     error("extract_speaker_embedding:DimensionMismatch", ...
         "Speaker embedding dimension %d does not match expected cfg.spk_emb_dim=%d.", ...
@@ -141,6 +141,9 @@ if ~all(isfinite(spk_emb))
     error("extract_speaker_embedding:NonFiniteEmbedding", ...
         "Speaker embedding contains non-finite values (NaN or Inf).");
 end
+
+% Canonical output: single-precision row vector [1 x 512]
+spk_emb = single(reshape(spk_emb, 1, cfg.spk_emb_dim));
 
 end
 
@@ -190,9 +193,13 @@ for i = 1:n_anchors
     f0_sim = exp(-0.5 * ((f0_median - anchors.f0_hz(i)) / 40)^2);
 
     % Gender matching bonus
-    if f0_median > 160 && anchors.gender(i) == "F"
+    g_str = "";
+    if isfield(anchors, 'gender') && numel(anchors.gender) >= i
+        g_str = upper(strtrim(string(anchors.gender(i))));
+    end
+    if f0_median > 160 && (g_str == "F" || strcmp(char(g_str), 'F'))
         gender_bonus = 0.3;
-    elseif f0_median <= 160 && anchors.gender(i) == "M"
+    elseif f0_median <= 160 && (g_str == "M" || strcmp(char(g_str), 'M'))
         gender_bonus = 0.3;
     else
         gender_bonus = 0.0;
@@ -233,8 +240,14 @@ emb = single(emb * (anchor_norm / max(eps, norm(double(emb)))));
 
 fprintf("[derive_xvector_from_dsp] X-vector norm: %.4f (anchor norm: %.4f)\n", ...
     norm(double(emb)), anchor_norm);
-fprintf("[derive_xvector_from_dsp] Weights: %s\n", ...
-    strjoin(arrayfun(@(w, n) sprintf("%s=%.2f", n, w), weights, anchors.names, 'UniformOutput', false), ", "));
+
+% Format weights display cleanly using char vectors to avoid MATLAB strjoin type mismatch
+weight_cells = cell(1, n_anchors);
+for a_idx = 1:n_anchors
+    a_name = char(string(anchors.names(a_idx)));
+    weight_cells{a_idx} = sprintf('%s=%.2f', a_name, weights(a_idx));
+end
+fprintf('[derive_xvector_from_dsp] Weights: %s\n', strjoin(weight_cells, ', '));
 
 end
 

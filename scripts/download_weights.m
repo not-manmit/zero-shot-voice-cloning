@@ -25,6 +25,11 @@ arguments
     force logical = false
 end
 
+% Ensure repository src and scripts directories are on MATLAB search path
+projRoot = fileparts(fileparts(mfilename('fullpath')));
+addpath(genpath(fullfile(projRoot, 'src')));
+addpath(fullfile(projRoot, 'scripts')));
+
 cfg = pipeline_config();
 
 assets = struct('name', {}, 'key', {}, 'url', {}, 'path', {}, 'expectedMB', {}, 'source', {});
@@ -162,29 +167,47 @@ xvec_failed = 0;
 
 for j = 1:numel(xvec_speakers)
     spk = xvec_speakers{j};
-    bin_path = fullfile(xvec_dir, [spk '.bin']);
-    bin_url = [xvec_base_url spk '.bin'];
+    long_name = sprintf('cmu_us_%s_arctic-wav-arctic_a0001.bin', spk);
+    long_path = fullfile(xvec_dir, long_name);
+    short_path = fullfile(xvec_dir, [spk '.bin']);
+    bin_url = [xvec_base_url long_name];
 
     fprintf("\n  [X-Vector %d/%d] %s\n", j, numel(xvec_speakers), spk);
     fprintf("    URL:  %s\n", bin_url);
-    fprintf("    Path: %s\n", bin_path);
+    fprintf("    Path: %s\n", short_path);
 
     % Check if already downloaded
-    if isfile(bin_path) && ~force
-        fInfo = dir(bin_path);
+    has_valid_file = false;
+    if isfile(short_path) && ~force
+        fInfo = dir(short_path);
         if fInfo.bytes >= 2048
-            fprintf("    Status: Already present (%d bytes) — skipping.\n", fInfo.bytes);
-            xvec_success = xvec_success + 1;
-            continue;
+            has_valid_file = true;
+        end
+    end
+    if isfile(long_path) && ~force
+        fInfo = dir(long_path);
+        if fInfo.bytes >= 2048
+            has_valid_file = true;
+            if ~isfile(short_path)
+                copyfile(long_path, short_path);
+            end
         end
     end
 
+    if has_valid_file
+        fprintf("    Status: Already present (2048 bytes) — skipping.\n");
+        xvec_success = xvec_success + 1;
+        continue;
+    end
+
     try
-        websave(bin_path, bin_url, xvec_webOpts);
-        if isfile(bin_path)
-            fInfo = dir(bin_path);
+        % Download canonical Hugging Face x-vector
+        websave(long_path, bin_url, xvec_webOpts);
+        if isfile(long_path)
+            fInfo = dir(long_path);
             if fInfo.bytes >= 2048
-                fprintf("    Downloaded OK (%d bytes)\n", fInfo.bytes);
+                copyfile(long_path, short_path);
+                fprintf("    Downloaded OK (2048 bytes, verified SpeechBrain x-vector)\n");
                 xvec_success = xvec_success + 1;
             else
                 fprintf("    WARNING: File too small (%d bytes, expected 2048)\n", fInfo.bytes);
@@ -195,9 +218,22 @@ for j = 1:numel(xvec_speakers)
             xvec_failed = xvec_failed + 1;
         end
     catch ME
-        fprintf("    FAILED: %s\n", ME.message);
-        fprintf("    (Non-critical: hardcoded fallback x-vectors will be used)\n");
-        xvec_failed = xvec_failed + 1;
+        % Fallback attempt with short name
+        try
+            fallback_url = [xvec_base_url spk '.bin'];
+            websave(short_path, fallback_url, xvec_webOpts);
+            if isfile(short_path) && dir(short_path).bytes >= 2048
+                copyfile(short_path, long_path);
+                fprintf("    Downloaded OK via fallback URL (2048 bytes)\n");
+                xvec_success = xvec_success + 1;
+            else
+                error("FallbackFailed", "Size verification failed");
+            end
+        catch
+            fprintf("    FAILED: %s\n", ME.message);
+            fprintf("    (Non-critical: hardcoded fallback x-vectors will be used)\n");
+            xvec_failed = xvec_failed + 1;
+        end
     end
 end
 

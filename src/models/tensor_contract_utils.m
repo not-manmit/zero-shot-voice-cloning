@@ -378,13 +378,8 @@ classdef tensor_contract_utils
                 raw = repmat(raw(1), 1, rf);
             end
 
-            % If values are outside [0, 1], apply logistic sigmoid
-            p = raw;
-            is_logit = any(p < 0 | p > 1);
-            if is_logit
-                p = 1.0 ./ (1.0 + exp(-double(p)));
-                p = single(p);
-            end
+            % SpeechT5 probOutput is a raw linear projection (logit) for stop token
+            p = single(1.0 ./ (1.0 + exp(-double(raw))));
         end
 
         function [formatted_input, in_name] = format_campp_inputs(fbank80, net)
