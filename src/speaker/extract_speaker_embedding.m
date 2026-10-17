@@ -79,7 +79,14 @@ if starts(end) + chunk_len - 1 < n_samples
 end
 starts = unique(starts);
 
-% 3. Attempt CAM++ Inference (only if no placeholder layers)
+% 3. Fast Path: Use DSP x-vector manifold directly if configured or if struct placeholder
+if (isfield(cfg, 'skip_campp_onnx_import') && cfg.skip_campp_onnx_import) || ...
+   (isfield(models, 'spk_encoder') && isstruct(models.spk_encoder))
+    spk_emb = derive_xvector_from_dsp(x, fs, cfg);
+    spk_emb = single(reshape(spk_emb, 1, cfg.spk_emb_dim));
+    return;
+end
+
 campp_succeeded = false;
 
 if isfield(models, 'spk_encoder') && ~isempty(models.spk_encoder)
