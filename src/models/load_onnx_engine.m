@@ -74,6 +74,18 @@ for i = 1:numel(modelKeys)
                 % Non-blocking: tensor_contract_utils.predict_net initializes dynamically at runtime
             end
         end
+        % If spk_encoder has placeholder layers, attempt repair
+        if strcmp(k, 'spk_encoder') && meta.hasPlaceholderLayers
+            try
+                [repaired_net, rep_success] = repair_campp_placeholders(net);
+                if rep_success
+                    net = repaired_net;
+                    meta.hasPlaceholderLayers = false;
+                    meta.isInitialized = true;
+                end
+            catch
+            end
+        end
         m.(k) = net;
         m.meta.(k) = meta;
         fprintf("  [%s] OK (via %s, %d inputs, %d outputs)\n", ...
