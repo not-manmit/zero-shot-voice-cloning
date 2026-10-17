@@ -28,7 +28,7 @@ end
 % Ensure repository src and scripts directories are on MATLAB search path
 projRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(fullfile(projRoot, 'src')));
-addpath(fullfile(projRoot, 'scripts')));
+addpath(fullfile(projRoot, 'scripts'));
 
 cfg = pipeline_config();
 

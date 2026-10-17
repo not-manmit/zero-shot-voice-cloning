@@ -22,7 +22,7 @@ fprintf("=======================================================================
 % Ensure src and scripts are on MATLAB path
 projRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(fullfile(projRoot, 'src')));
-addpath(fullfile(projRoot, 'scripts')));
+addpath(fullfile(projRoot, 'scripts'));
 
 report = struct();
 cfg = pipeline_config();

@@ -29,8 +29,8 @@ summary.matlabVersion = version;
 % 1. Environment & Paths
 project_root = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(fullfile(project_root, 'src')));
-addpath(fullfile(project_root, 'scripts')));
-addpath(fullfile(project_root, 'tests')));
+addpath(fullfile(project_root, 'scripts'));
+addpath(fullfile(project_root, 'tests'));
 addpath(fullfile(project_root, 'ui'));
 
 fprintf("[1/6] Inspecting environment ...\n");

@@ -17,7 +17,7 @@ fprintf("=================================================================\n\n")
 % 1. Add repository paths
 projRoot = fileparts(mfilename('fullpath'));
 addpath(genpath(fullfile(projRoot, 'src')));
-addpath(fullfile(projRoot, 'scripts')));
+addpath(fullfile(projRoot, 'scripts'));
 addpath(fullfile(projRoot, 'ui'));
 
 cfg = pipeline_config();
