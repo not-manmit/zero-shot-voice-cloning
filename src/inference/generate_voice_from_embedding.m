@@ -25,7 +25,7 @@ function result = generate_voice_from_embedding(speakerEmbedding, targetText, mo
 %              .metadata          – Synthesis parameters and diagnostics
 
 arguments
-    speakerEmbedding (:,1) {mustBeNumeric, mustBeFinite}
+    speakerEmbedding (:,:) {mustBeNumeric, mustBeFinite}
     targetText (1,1) string
     models struct = struct()
     cfg struct = struct()
