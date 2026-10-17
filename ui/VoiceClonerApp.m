@@ -34,6 +34,7 @@ classdef VoiceClonerApp < handle
             uibutton(app.UIFigure, Text="Stop", Position=[130 640 90 30], ButtonPushedFcn=@app.stopRecording);
             uibutton(app.UIFigure, Text="Upload WAV", Position=[230 640 120 30], ButtonPushedFcn=@app.loadReference);
             uibutton(app.UIFigure, Text="Play Reference", Position=[360 640 120 30], ButtonPushedFcn=@app.playReference);
+            uibutton(app.UIFigure, Text="Load Demo Voice", Position=[490 640 130 30], ButtonPushedFcn=@app.loadDemoReference);
 
             uilabel(app.UIFigure, Text="TARGET TEXT", Position=[30 590 150 22], FontWeight='bold');
             app.TargetTextArea = uitextarea(app.UIFigure, Position=[30 520 430 65], ...
@@ -47,14 +48,10 @@ classdef VoiceClonerApp < handle
             app.MetricsLabel = uilabel(app.UIFigure, Text="Metrics: –", Position=[500 445 460 22]);
 
             app.ReferenceAxes = uiaxes(app.UIFigure, Position=[30 290 430 140]);
-            title(app.ReferenceAxes, "Reference Speech Waveform");
-
             app.OutputAxes = uiaxes(app.UIFigure, Position=[500 290 430 140]);
-            title(app.OutputAxes, "Cloned Speech Waveform");
-
             app.MelAxes = uiaxes(app.UIFigure, Position=[30 60 900 190]);
-            title(app.MelAxes, "Synthesized 80-bin Mel Spectrogram");
 
+            app.initializePlots();
             app.loadModels();
         end
 
@@ -269,12 +266,86 @@ classdef VoiceClonerApp < handle
             end
         end
 
+        function initializePlots(app)
+            % Initialize ReferenceAxes
+            cla(app.ReferenceAxes);
+            grid(app.ReferenceAxes, 'on');
+            box(app.ReferenceAxes, 'on');
+            xlim(app.ReferenceAxes, [0 1]);
+            ylim(app.ReferenceAxes, [-1 1]);
+            xlabel(app.ReferenceAxes, 'Time (seconds)');
+            ylabel(app.ReferenceAxes, 'Amplitude');
+            title(app.ReferenceAxes, "Reference Speech Waveform (No audio loaded)");
+
+            % Initialize OutputAxes
+            cla(app.OutputAxes);
+            grid(app.OutputAxes, 'on');
+            box(app.OutputAxes, 'on');
+            xlim(app.OutputAxes, [0 1]);
+            ylim(app.OutputAxes, [-1 1]);
+            xlabel(app.OutputAxes, 'Time (seconds)');
+            ylabel(app.OutputAxes, 'Amplitude');
+            title(app.OutputAxes, "Synthesized Speech Waveform (Ready)");
+
+            % Initialize MelAxes
+            cla(app.MelAxes);
+            grid(app.MelAxes, 'on');
+            box(app.MelAxes, 'on');
+            xlim(app.MelAxes, [1 100]);
+            ylim(app.MelAxes, [1 80]);
+            xlabel(app.MelAxes, 'Temporal Frames');
+            ylabel(app.MelAxes, 'Mel Frequency Bins (1-80)');
+            title(app.MelAxes, "Synthesized 80-bin Mel Spectrogram (Ready)");
+
+            drawnow;
+        end
+
+        function loadDemoReference(app, ~, ~)
+            app.StatusLabel.Text = "Loading demo reference voice...";
+            drawnow;
+            baseDir = fileparts(fileparts(mfilename('fullpath')));
+            demoPath = fullfile(baseDir, 'tests', 'reference_speech.wav');
+            if isfile(demoPath)
+                try
+                    [x, fs] = audioread(demoPath);
+                    [x_clean, fs_clean] = preprocess_signal(x, fs, app.Config.fs);
+                    dur = numel(x_clean) / fs_clean;
+                    app.setReferenceAudio(x_clean, fs_clean, "Demo Voice (tests/reference_speech.wav)");
+                    app.StatusLabel.Text = sprintf("Demo reference loaded: reference_speech.wav (%.1f s). Ready to Generate.", dur);
+                    drawnow;
+                    return;
+                catch ME
+                    fprintf('[VoiceClonerApp] Could not read reference_speech.wav: %s. Generating synthetic harmonic voice.\n', ME.message);
+                end
+            end
+
+            fs = app.Config.fs;
+            dur = 2.5;
+            t = (0:(round(dur * fs) - 1)) / fs;
+            f0 = 125;
+            src = sin(2*pi*f0*t) + 0.5*sin(2*pi*2*f0*t) + 0.25*sin(2*pi*3*f0*t) + 0.12*sin(2*pi*4*f0*t);
+            b = [0.1 0.2 0.3 0.2 0.1];
+            sig = filter(b, 1, src);
+            sig = sig / (max(abs(sig)) + 1e-6) * 0.8;
+            app.setReferenceAudio(sig, fs, "Demo Voice (Harmonic 125 Hz)");
+            app.StatusLabel.Text = sprintf("Demo reference voice loaded (%.1f s, f0=125 Hz). Ready to Generate.", dur);
+            drawnow;
+        end
+
         function updateReferencePlot(app)
             if isempty(app.ReferenceAxes) || ~isvalid(app.ReferenceAxes)
                 return;
             end
             if isempty(app.ReferenceAudio)
                 cla(app.ReferenceAxes);
+                grid(app.ReferenceAxes, 'on');
+                box(app.ReferenceAxes, 'on');
+                xlim(app.ReferenceAxes, [0 1]);
+                ylim(app.ReferenceAxes, [-1 1]);
+                xlabel(app.ReferenceAxes, 'Time (seconds)');
+                ylabel(app.ReferenceAxes, 'Amplitude');
+                title(app.ReferenceAxes, "Reference Speech Waveform (No audio loaded)");
+                drawnow;
                 return;
             end
             t = (0:numel(app.ReferenceAudio)-1) / app.ReferenceFs;
@@ -283,6 +354,10 @@ classdef VoiceClonerApp < handle
             ylabel(app.ReferenceAxes, 'Amplitude');
             title(app.ReferenceAxes, sprintf('Reference Speech (%s, %.1f s)', app.ReferenceSource, numel(app.ReferenceAudio)/app.ReferenceFs));
             grid(app.ReferenceAxes, 'on');
+            box(app.ReferenceAxes, 'on');
+            xlim(app.ReferenceAxes, [0 max(1, t(end))]);
+            ylim(app.ReferenceAxes, [-1 1]);
+            drawnow;
         end
 
         function updateOutputPlot(app)
@@ -291,6 +366,14 @@ classdef VoiceClonerApp < handle
             end
             if isempty(app.GeneratedAudio)
                 cla(app.OutputAxes);
+                grid(app.OutputAxes, 'on');
+                box(app.OutputAxes, 'on');
+                xlim(app.OutputAxes, [0 1]);
+                ylim(app.OutputAxes, [-1 1]);
+                xlabel(app.OutputAxes, 'Time (seconds)');
+                ylabel(app.OutputAxes, 'Amplitude');
+                title(app.OutputAxes, "Synthesized Speech Waveform (Ready)");
+                drawnow;
                 return;
             end
             t = (0:numel(app.GeneratedAudio)-1) / app.GeneratedFs;
@@ -300,6 +383,10 @@ classdef VoiceClonerApp < handle
             title(app.OutputAxes, sprintf('Synthesized Waveform (%.2f s, %d Hz)', ...
                 numel(app.GeneratedAudio)/app.GeneratedFs, app.GeneratedFs));
             grid(app.OutputAxes, 'on');
+            box(app.OutputAxes, 'on');
+            xlim(app.OutputAxes, [0 max(1, t(end))]);
+            ylim(app.OutputAxes, [-1 1]);
+            drawnow;
         end
 
         function updateMelPlot(app, mel)
@@ -311,10 +398,11 @@ classdef VoiceClonerApp < handle
                 imagesc(app.MelAxes, mel);
                 axis(app.MelAxes, 'tight');
                 xlabel(app.MelAxes, 'Temporal Frames');
-                ylabel(app.MelAxes, 'Mel Frequency Bins (80-7600 Hz)');
+                ylabel(app.MelAxes, 'Mel Frequency Bins (1-80)');
                 title(app.MelAxes, sprintf('Synthesized Mel Features [80 x %d]', size(mel, 2)));
                 colormap(app.MelAxes, 'parula');
                 colorbar(app.MelAxes);
+                drawnow;
             catch
             end
         end
